@@ -1,0 +1,5 @@
+/target
+/dist
+/ggml-*.bin
+/src/whisper.cpp/build
+/src/whisper.cpp/models/ggml-*.bin
