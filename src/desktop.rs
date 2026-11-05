@@ -455,19 +455,13 @@ impl DesktopApp {
                 if audio.is_none() {
                     audio_error
                         .as_ref()
-                        .map(|error| format!("Escucha automática no disponible: {error}"))
+                        .map(|error| format!("Micrófono no disponible: {error}"))
                 } else {
                     None
                 }
             })
-            .unwrap_or_else(|| {
-                if audio.is_some() {
-                    "Escucha automática activa. Habla cuando quieras.".to_string()
-                } else {
-                    "Escucha automática no disponible".to_string()
-                }
-            });
-        let auto_listening = audio.is_some();
+            .unwrap_or_else(|| "Listo para hablar con el atajo o el botón Hablar.".to_string());
+        let auto_listening = false;
         let agent = Agent::new(config.clone())?;
 
         Ok(Self {

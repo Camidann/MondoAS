@@ -29,14 +29,14 @@ Copy-Item .\src\whisper.cpp\models\ggml-base-q5_1.bin .\whisper\
 ## Cómo lo uso
 
 - **Chat:** presiona `Ctrl+F` para abrirlo y vuelve a presionar `Ctrl+F` o `Esc` para cerrarlo.
-- **Hablar sin pulsar:** por defecto, Mondo escucha automáticamente. Habla con el micrófono y, cuando termines, espera dos segundos de silencio: enviará la consulta a Whisper y responderá. Puedes pausar o reanudar la escucha automática desde el chat.
-- **Hablar manualmente:** mantén presionado el atajo de voz mientras hablas y suéltalo al terminar. También puedes usar el botón **Hablar**.
+- **Hablar manualmente:** por defecto, mantén presionado el atajo de voz mientras hablas y suéltalo al terminar. También puedes usar el botón **Hablar**.
+- **Escucha automática:** puedes reanudarla desde el chat. Mondo escucha por el micrófono y, al detectar dos segundos de silencio, envía la consulta a Whisper.
 - **Pantalla completa:** el botón muestra solo la cara. Presiona `F11` o `Esc` para volver.
 - **Cambiar la cara:** usa **Elegir caras** para seleccionar imágenes. Mondo las ordena por nombre de archivo. También puedes estirar la cara con el mouse; el tamaño se guarda en `config.txt`.
 - **Ocultar la cara:** usa `Alt+Shift+P` o el atajo que hayas configurado.
 - **Abrir una aplicación por voz:** di, por ejemplo, «abrí Chrome» o «abrí Calculadora». Para cerrarla, di «cerrá Chrome». Si hay más de una coincidencia, Mondo te pide que aclares cuál.
 
-En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y luego transcribe y envía la consulta a Ollama. En modo manual muestra fragmentos de lo que reconoce mientras hablas. Muestra la respuesta en el chat y, si está activada la voz, también la lee en voz alta.
+En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y luego transcribe y envía la consulta a Ollama. En modo manual muestra fragmentos de lo que reconoce mientras hablas. Muestra la respuesta en el chat; la lectura en voz alta se puede activar con `speech_enabled=true`.
 
 La voz y el reconocimiento se procesan localmente. Ollama debe estar abierto; puede estar en esta computadora o en otra a la que tengas acceso por red.
 
@@ -72,7 +72,7 @@ Estas son las opciones principales:
 | `avatar_enabled` | Indica si la cara aparece al iniciar. |
 | `avatar_size` y `avatar_height` | Ancho y alto de la cara. El ancho puede ser de 64 a 512; el alto, de 64 a 768. |
 | `voice_name` | Nombre exacto de una voz instalada. En Windows puedes verlas con `Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() \| ForEach-Object { $_.VoiceInfo.Name }`. Déjalo vacío para usar la voz predeterminada. Esto selecciona una voz del sistema; no crea ni clona voces. |
-| `speech_enabled` | Activa o desactiva la respuesta hablada. |
+| `speech_enabled` | Activa o desactiva la respuesta hablada; `false` deja las respuestas solo en texto. |
 
 Los atajos deben ser distintos. Puedes escribir combinaciones como `CTRL+F9` o `ALT+SHIFT+M`. Si el sistema no permite registrar un atajo global, usa el botón de la ventana.
 

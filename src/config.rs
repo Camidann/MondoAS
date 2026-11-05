@@ -314,7 +314,7 @@ impl AgentConfig {
             avatar_height: 320.0,
             avatar_speed: 0.0,
             voice_name: String::new(),
-            speech_enabled: true,
+            speech_enabled: false,
             config_path: PathBuf::new(),
         }
     }
@@ -346,7 +346,7 @@ impl AgentConfig {
          avatar_height=320\n\
          avatar_speed=0.0\n\
          voice_name=\n\
-         speech_enabled=true\n",
+         speech_enabled=false\n",
             default_whisper_threads(),
             default_whisper_beam_size(),
             default_whisper_server_config_value(),
