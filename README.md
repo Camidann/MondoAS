@@ -40,6 +40,10 @@ En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y 
 
 La voz y el reconocimiento se procesan localmente. Ollama debe estar abierto; puede estar en esta computadora o en otra a la que tengas acceso por red.
 
+### Ollama en otra computadora de la red
+
+Si Mondo corre en una Raspberry Pi y Ollama en una PC con Windows, configura Ollama en Windows para escuchar en la red local. En PowerShell ejecuta `setx OLLAMA_HOST "0.0.0.0:11434"` y reinicia Ollama desde el icono de la bandeja. Permite el puerto en el firewall solo para redes privadas. En el `config.txt` de la Raspberry, `ollama_url` debe usar la IPv4 de esa PC; este clon está configurado con `192.168.1.17`, que puedes cambiar si la dirección de la PC cambia. Reserva esa IP en el router para que no varíe. Desde la Pi, comprueba la conexión con `curl http://192.168.1.17:11434/api/tags`.
+
 ## Configuración
 
 Mondo crea `config.txt` si no existe. Puedes cambiar las opciones con cualquier editor de texto. Las rutas relativas, como `avatar.png`, se buscan desde la carpeta donde está ese archivo. Al ejecutar Mondo desde `target\debug` o `target\release`, se usa el `config.txt` de la carpeta principal del proyecto.
@@ -90,7 +94,7 @@ En Debian, Ubuntu o Raspberry Pi OS, instala las dependencias:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libudev-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
+sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libudev-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Para cerrar aplicaciones por voz en X11, instala también `wmctrl`. Esa función no está disponible en Wayland. Algunos escritorios Wayland tampoco permiten atajos globales; en ese caso, usa el botón **Hablar**.
