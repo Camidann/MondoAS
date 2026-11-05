@@ -100,7 +100,7 @@ sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev
 Para cerrar aplicaciones por voz en X11, instala también `wmctrl`. Esa función no está disponible en Wayland. Algunos escritorios Wayland tampoco permiten atajos globales; en ese caso, usa el botón **Hablar**.
 
 Instala Rust estable y compila Mondo y Whisper:
-
+q
 ```bash
 cargo build --release
 cmake -S src/whisper.cpp -B src/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON

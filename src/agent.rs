@@ -40,11 +40,12 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(config: AgentConfig) -> Self {
-        Self {
-            client: Client::new(),
-            config,
-        }
+    pub fn new(config: AgentConfig) -> Result<Self> {
+        let client = Client::builder()
+            .no_proxy()
+            .build()
+            .context("No se pudo configurar la conexión directa con Ollama")?;
+        Ok(Self { client, config })
     }
 
     pub async fn respond_streaming(
@@ -87,7 +88,7 @@ impl Agent {
             })
             .send()
             .await
-            .context("No se pudo conectar con Ollama")?;
+            .with_context(|| format!("No se pudo conectar con Ollama en {url}"))?;
 
         if !response.status().is_success() {
             let status = response.status();

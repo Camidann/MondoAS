@@ -468,10 +468,11 @@ impl DesktopApp {
                 }
             });
         let auto_listening = audio.is_some();
+        let agent = Agent::new(config.clone())?;
 
         Ok(Self {
             avatar_visible: config.avatar_enabled,
-            agent: Agent::new(config.clone()),
+            agent,
             transcriber: WhisperTranscriber::new(config.clone()),
             config,
             runtime,
