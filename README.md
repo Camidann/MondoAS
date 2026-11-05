@@ -90,7 +90,7 @@ En Debian, Ubuntu o Raspberry Pi OS, instala las dependencias:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
+sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libudev-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Para cerrar aplicaciones por voz en X11, instala también `wmctrl`. Esa función no está disponible en Wayland. Algunos escritorios Wayland tampoco permiten atajos globales; en ese caso, usa el botón **Hablar**.
