@@ -293,7 +293,7 @@ impl AgentConfig {
         Self {
             assistant_name: "Mondo".to_string(),
             ollama_url: "http://localhost:11434".to_string(),
-            model: "llama3.2:1b".to_string(),
+            model: "qwen2.5:3b".to_string(),
             system_prompt: "Sos un asistente amable y útil. Responde en el idioma del usuario."
                 .to_string(),
             temperature: 0.7,
@@ -303,10 +303,10 @@ impl AgentConfig {
             avatar_toggle_hotkey: "ALT+SHIFT+P".to_string(),
             whisper_language: "es".to_string(),
             whisper_prompt: "Español rioplatense. Abrime, abrí, abrí me, abrir, cerrame, cerrá, cerrá me, cerrar, Spotify, WhatsApp, YouTube, Chrome, Firefox, Discord, Steam, Zoom, Teams, VS Code".to_string(),
-            whisper_threads: 4,
-            whisper_beam_size: 3,
+            whisper_threads: default_whisper_threads(),
+            whisper_beam_size: default_whisper_beam_size(),
             whisper_server_bin: default_whisper_server_path(),
-            whisper_model: PathBuf::from("whisper").join("ggml-base-q5_1.bin"),
+            whisper_model: PathBuf::from("whisper").join(default_whisper_model_filename()),
             avatar_file: PathBuf::from("avatar.png"),
             avatar_sequence: Vec::new(),
             avatar_enabled: true,
@@ -325,7 +325,7 @@ impl AgentConfig {
          # Las rutas relativas se resuelven desde la carpeta de este archivo.\n\
          assistant_name=Mondo\n\
          ollama_url=http://localhost:11434\n\
-         model=llama3.2:1b\n\
+         model=qwen2.5:3b\n\
          system_prompt=Sos un asistente amable y útil. Responde en el idioma del usuario.\n\
          temperature=0.7\n\
          context_size=4096\n\
@@ -334,10 +334,10 @@ impl AgentConfig {
          avatar_toggle_hotkey=ALT+SHIFT+P\n\
          whisper_language=es\n\
          whisper_prompt=Español rioplatense. Abrime, abrí, abrí me, abrir, cerrame, cerrá, cerrá me, cerrar, Spotify, WhatsApp, YouTube, Chrome, Firefox, Discord, Steam, Zoom, Teams, VS Code\n\
-         whisper_threads=4\n\
-         whisper_beam_size=3\n\
+         whisper_threads={}\n\
+         whisper_beam_size={}\n\
          whisper_server_bin={}\n\
-         whisper_model=whisper\\ggml-base-q5_1.bin\n\
+         whisper_model=whisper\\{}\n\
          avatar_file=avatar.png\n\
          avatar_sequence=\n\
          avatar_enabled=true\n\
@@ -347,7 +347,10 @@ impl AgentConfig {
          avatar_speed=0.0\n\
          voice_name=\n\
          speech_enabled=true\n",
-            default_whisper_server_config_value()
+            default_whisper_threads(),
+            default_whisper_beam_size(),
+            default_whisper_server_config_value(),
+            default_whisper_model_filename()
         )
     }
 }
@@ -372,6 +375,30 @@ fn default_whisper_server_path() -> PathBuf {
     #[cfg(not(target_os = "windows"))]
     {
         PathBuf::from("whisper").join("whisper-server")
+    }
+}
+
+fn default_whisper_threads() -> usize {
+    if cfg!(any(target_arch = "arm", target_arch = "aarch64")) {
+        2
+    } else {
+        4
+    }
+}
+
+fn default_whisper_beam_size() -> usize {
+    if cfg!(any(target_arch = "arm", target_arch = "aarch64")) {
+        1
+    } else {
+        3
+    }
+}
+
+fn default_whisper_model_filename() -> &'static str {
+    if cfg!(any(target_arch = "arm", target_arch = "aarch64")) {
+        "ggml-tiny-q5_1.bin"
+    } else {
+        "ggml-base-q5_1.bin"
     }
 }
 
@@ -433,7 +460,10 @@ fn resolve_whisper_path(base: &Path, configured: &str, executable: bool) -> Path
             "whisper/whisper-server" | "whisper/whisper-server.exe"
         )
     } else {
-        configured.replace('\\', "/") == "whisper/ggml-base-q5_1.bin"
+        matches!(
+            configured.replace('\\', "/").as_str(),
+            "whisper/ggml-base-q5_1.bin" | "whisper/ggml-tiny-q5_1.bin"
+        )
     };
     if !is_default_path {
         return configured_path;
@@ -470,8 +500,8 @@ fn resolve_whisper_path(base: &Path, configured: &str, executable: bool) -> Path
                     .join("src")
                     .join("whisper.cpp")
                     .join("models")
-                    .join("ggml-base-q5_1.bin"),
-                ancestor.join("ggml-base-q5_1.bin"),
+                    .join(configured_path.file_name().unwrap_or_default()),
+                ancestor.join(configured_path.file_name().unwrap_or_default()),
             ]
         };
         if let Some(candidate) = candidates.into_iter().find(|path| path.is_file()) {
@@ -628,6 +658,27 @@ mod tests {
     }
 
     #[test]
+    fn defaults_use_small_whisper_settings_on_arm() {
+        let config = AgentConfig::defaults();
+
+        if cfg!(any(target_arch = "arm", target_arch = "aarch64")) {
+            assert_eq!(config.whisper_threads, 2);
+            assert_eq!(config.whisper_beam_size, 1);
+            assert_eq!(
+                config.whisper_model.file_name().unwrap(),
+                "ggml-tiny-q5_1.bin"
+            );
+        } else {
+            assert_eq!(config.whisper_threads, 4);
+            assert_eq!(config.whisper_beam_size, 3);
+            assert_eq!(
+                config.whisper_model.file_name().unwrap(),
+                "ggml-base-q5_1.bin"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_identical_global_hotkeys() {
         let error = AgentConfig::parse(
             "push_to_talk_hotkey=CTRL+F9\navatar_toggle_hotkey=CTRL+F9\n",
@@ -675,6 +726,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.whisper_server_bin, whisper_server_bin);
+        assert_eq!(config.whisper_model, whisper_model);
+    }
+
+    #[test]
+    fn finds_tiny_whisper_model_for_a_release_executable() {
+        let project = tempfile::tempdir().unwrap();
+        let executable_dir = project.path().join("target").join("release");
+        let whisper_model = project.path().join("ggml-tiny-q5_1.bin");
+        std::fs::write(&whisper_model, b"test model").unwrap();
+
+        let config = AgentConfig::parse(
+            "whisper_model=whisper/ggml-tiny-q5_1.bin\n",
+            executable_dir,
+            project
+                .path()
+                .join("target")
+                .join("release")
+                .join("config.txt"),
+        )
+        .unwrap();
+
         assert_eq!(config.whisper_model, whisper_model);
     }
 

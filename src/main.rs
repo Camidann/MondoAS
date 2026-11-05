@@ -18,14 +18,17 @@ fn main() {
 
 fn run() -> Result<()> {
     let config = AgentConfig::load()?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
+    runtime_builder.worker_threads(2);
+    let runtime = runtime_builder
         .enable_all()
         .build()
         .context("No se pudo iniciar el runtime de red y audio")?;
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([760.0, 800.0])
-            .with_min_inner_size([480.0, 480.0]),
+            .with_inner_size([640.0, 480.0])
+            .with_min_inner_size([400.0, 320.0]),
         ..Default::default()
     };
     let title = config.assistant_name.clone();

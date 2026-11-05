@@ -44,7 +44,7 @@ impl WhisperTranscriber {
             .file_name("audio.wav")
             .mime_str("audio/wav")
             .context("No se pudo preparar el WAV para Whisper")?;
-        let beam_size = self.config.whisper_beam_size.max(3);
+        let beam_size = self.config.whisper_beam_size;
         let form = multipart::Form::new()
             .part("file", file)
             .text("language", self.config.whisper_language.clone())
@@ -102,7 +102,7 @@ impl WhisperTranscriber {
             .port();
         drop(listener);
 
-        let beam_size = self.config.whisper_beam_size.max(3);
+        let beam_size = self.config.whisper_beam_size;
         let mut child = Command::new(&self.config.whisper_server_bin)
             .args(["-m"])
             .arg(&self.config.whisper_model)

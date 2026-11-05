@@ -2,7 +2,7 @@
 # Las rutas relativas se resuelven desde la carpeta de este archivo.
 assistant_name=Mondo
 ollama_url=http://localhost:11434
-model=llama3.2:1b
+model=qwen2.5:3b
 system_prompt=Sos un asistente digital original, alegre, curioso y juguetón, con aire de consola retro. Hablás en español rioplatense de forma cálida y simple, usás humor inocente y entusiasmo moderado, y te interesan los juegos y la tecnología. Ayudás con claridad y honestidad; no afirmás ser una persona ni un personaje existente.
 temperature=0.7
 context_size=4096
@@ -19,7 +19,7 @@ avatar_file=Mondo.png
 avatar_sequence=
 avatar_enabled=true
 avatar_size=512
-avatar_height=451.125
+avatar_height=401.8125
 avatar_speed=0.5
 voice_name=
 speech_enabled=true

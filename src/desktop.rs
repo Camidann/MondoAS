@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, Sender},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::task::JoinHandle;
 
@@ -41,6 +41,59 @@ enum FaceState {
     Speaking,
     Error,
     Warmup,
+}
+
+const VOICE_ACTIVITY_THRESHOLD: f32 = 0.015;
+const VOICE_START_CONFIRMATION: Duration = Duration::from_millis(150);
+const VOICE_END_SILENCE: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VoiceActivity {
+    Started,
+    Finished,
+}
+
+#[derive(Default)]
+struct AutomaticSpeechDetector {
+    voice_since: Option<Instant>,
+    silence_since: Option<Instant>,
+}
+
+impl AutomaticSpeechDetector {
+    fn update(&mut self, now: Instant, level: f32, recording: bool) -> Option<VoiceActivity> {
+        if recording {
+            self.voice_since = None;
+            if level >= VOICE_ACTIVITY_THRESHOLD {
+                self.silence_since = None;
+                return None;
+            }
+
+            let silence_since = *self.silence_since.get_or_insert(now);
+            if now.duration_since(silence_since) >= VOICE_END_SILENCE {
+                self.reset();
+                return Some(VoiceActivity::Finished);
+            }
+            return None;
+        }
+
+        self.silence_since = None;
+        if level < VOICE_ACTIVITY_THRESHOLD {
+            self.voice_since = None;
+            return None;
+        }
+
+        let voice_since = *self.voice_since.get_or_insert(now);
+        if now.duration_since(voice_since) >= VOICE_START_CONFIRMATION {
+            self.voice_since = None;
+            return Some(VoiceActivity::Started);
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.voice_since = None;
+        self.silence_since = None;
+    }
 }
 
 fn default_input_device_label() -> &'static str {
@@ -284,6 +337,9 @@ pub struct DesktopApp {
     input: String,
     status: String,
     recording: bool,
+    automatic_recording: bool,
+    auto_listening: bool,
+    speech_detector: AutomaticSpeechDetector,
     live_transcription: Option<JoinHandle<()>>,
     live_transcript: String,
     request_running: bool,
@@ -368,11 +424,21 @@ impl DesktopApp {
             };
 
         let (event_tx, event_rx) = mpsc::channel();
-        let (input_devices, audio_error) = match input_device_names() {
+        let (input_devices, mut audio_error) = match input_device_names() {
             Ok(devices) => (devices, None),
             Err(err) => (Vec::new(), Some(format!("{err:#}"))),
         };
         let selected_input_device = config.input_device.clone();
+        let selected_device =
+            (!selected_input_device.is_empty()).then_some(selected_input_device.as_str());
+        let audio = match AudioInput::new(selected_device) {
+            Ok(audio) => Some(audio),
+            Err(err) => {
+                let message = format!("{err:#}");
+                audio_error = Some(message);
+                None
+            }
+        };
         let configured_paths = configured_avatar_paths(&config);
         let (avatar_paths, path_warning) = match resolve_avatar_paths(&config) {
             Ok(paths) => (paths, None),
@@ -384,6 +450,24 @@ impl DesktopApp {
                 Err(err) => (Vec::new(), Some(format!("{err:#}"))),
             };
         let avatar_warning = path_warning.or(texture_warning);
+        let initial_status = avatar_warning
+            .or_else(|| {
+                if audio.is_none() {
+                    audio_error
+                        .as_ref()
+                        .map(|error| format!("Escucha automática no disponible: {error}"))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| {
+                if audio.is_some() {
+                    "Escucha automática activa. Habla cuando quieras.".to_string()
+                } else {
+                    "Escucha automática no disponible".to_string()
+                }
+            });
+        let auto_listening = audio.is_some();
 
         Ok(Self {
             avatar_visible: config.avatar_enabled,
@@ -391,7 +475,7 @@ impl DesktopApp {
             transcriber: WhisperTranscriber::new(config.clone()),
             config,
             runtime,
-            audio: None,
+            audio,
             audio_error,
             input_devices,
             selected_input_device,
@@ -399,8 +483,11 @@ impl DesktopApp {
             event_rx,
             messages: Vec::new(),
             input: String::new(),
-            status: avatar_warning.unwrap_or_else(|| "Listo".to_string()),
+            status: initial_status,
             recording: false,
+            automatic_recording: false,
+            auto_listening,
+            speech_detector: AutomaticSpeechDetector::default(),
             live_transcription: None,
             live_transcript: String::new(),
             request_running: false,
@@ -457,7 +544,70 @@ impl DesktopApp {
         if let Some(error) = self.audio.as_ref().and_then(AudioInput::take_stream_error) {
             self.status = format!("Error del micrófono: {error}");
             self.audio_error = Some(error);
+            self.audio = None;
+            self.auto_listening = false;
+            self.speech_detector.reset();
             self.recording = false;
+            self.automatic_recording = false;
+        }
+    }
+
+    fn open_audio_input(&mut self) -> Result<()> {
+        let selected =
+            (!self.selected_input_device.is_empty()).then_some(self.selected_input_device.as_str());
+        self.audio = Some(AudioInput::new(selected)?);
+        self.audio_error = None;
+        Ok(())
+    }
+
+    fn toggle_auto_listening(&mut self) {
+        if self.recording || self.request_running {
+            return;
+        }
+
+        self.speech_detector.reset();
+        if self.auto_listening {
+            self.auto_listening = false;
+            self.audio = None;
+            self.status = "Escucha automática pausada".to_string();
+            return;
+        }
+
+        match self.open_audio_input() {
+            Ok(()) => {
+                self.auto_listening = true;
+                self.status = "Escucha automática activa. Habla cuando quieras.".to_string();
+            }
+            Err(err) => {
+                let message = format!("{err:#}");
+                self.audio_error = Some(message.clone());
+                self.status = format!("No se pudo activar la escucha automática: {message}");
+            }
+        }
+    }
+
+    fn poll_automatic_speech(&mut self) {
+        if !self.auto_listening
+            || self.request_running
+            || self.speaking.load(Ordering::Relaxed)
+            || (self.recording && !self.automatic_recording)
+        {
+            self.speech_detector.reset();
+            return;
+        }
+
+        let Some(audio) = &self.audio else {
+            self.speech_detector.reset();
+            return;
+        };
+        let level = audio.input_level();
+        match self
+            .speech_detector
+            .update(Instant::now(), level, self.automatic_recording)
+        {
+            Some(VoiceActivity::Started) => self.start_recording(true),
+            Some(VoiceActivity::Finished) => self.finish_recording(),
+            None => {}
         }
     }
 
@@ -566,31 +716,45 @@ impl DesktopApp {
             return;
         }
 
-        if !self.recording {
-            if self.audio.is_none() {
-                let selected = (!self.selected_input_device.is_empty())
-                    .then_some(self.selected_input_device.as_str());
-                match AudioInput::new(selected) {
-                    Ok(audio) => {
-                        self.audio = Some(audio);
-                        self.audio_error = None;
-                    }
-                    Err(err) => {
-                        let message = format!("{err:#}");
-                        self.audio_error = Some(message.clone());
-                        self.status = message;
-                        return;
-                    }
-                }
-            }
-            let Some(audio) = &self.audio else {
-                self.status = "No se pudo iniciar el micrófono".to_string();
-                return;
-            };
-            match audio.start() {
-                Ok(()) => {
-                    self.recording = true;
-                    self.live_transcript.clear();
+        if self.recording {
+            self.finish_recording();
+        } else {
+            self.start_recording(false);
+        }
+    }
+
+    fn start_recording(&mut self, automatic: bool) {
+        if self.request_running {
+            return;
+        }
+
+        if self.audio.is_none()
+            && let Err(err) = self.open_audio_input()
+        {
+            let message = format!("{err:#}");
+            self.audio_error = Some(message.clone());
+            self.status = message;
+            return;
+        }
+        let Some(audio) = &self.audio else {
+            self.status = "No se pudo iniciar el micrófono".to_string();
+            return;
+        };
+        let start_result = if automatic {
+            audio.start_with_pre_roll()
+        } else {
+            audio.start()
+        };
+        match start_result {
+            Ok(()) => {
+                self.recording = true;
+                self.automatic_recording = automatic;
+                self.live_transcript.clear();
+                self.speech_detector.reset();
+                if automatic {
+                    self.status =
+                        "Te escucho; responderé después de 2 segundos de silencio.".to_string();
+                } else {
                     self.status = "Escuchando y transcribiendo en vivo...".to_string();
                     let source = audio.snapshot_source();
                     let transcriber = self.transcriber.clone();
@@ -599,21 +763,31 @@ impl DesktopApp {
                         transcribe_live_audio(source, transcriber, tx).await;
                     }));
                 }
-                Err(err) => self.status = format!("Error al iniciar el micrófono: {err:#}"),
             }
+            Err(err) => self.status = format!("Error al iniciar el micrófono: {err:#}"),
+        }
+    }
+
+    fn finish_recording(&mut self) {
+        if !self.recording {
             return;
         }
-
         self.recording = false;
+        self.automatic_recording = false;
+        self.speech_detector.reset();
         if let Some(worker) = self.live_transcription.take() {
             worker.abort();
         }
         self.live_transcript.clear();
-        let Some(audio) = self.audio.take() else {
+        let Some(audio) = &self.audio else {
             return;
         };
-        match audio.finish() {
+        let finish_result = audio.finish();
+        match finish_result {
             Ok(wav) => {
+                if !self.auto_listening {
+                    self.audio = None;
+                }
                 let path = wav.path().to_path_buf();
                 let transcriber = self.transcriber.clone();
                 let agent = self.agent.clone();
@@ -891,6 +1065,7 @@ impl eframe::App for DesktopApp {
         self.poll_hotkey();
         self.poll_events();
         self.poll_audio_error();
+        self.poll_automatic_speech();
 
         let mut toggle_fullscreen =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11));
@@ -912,7 +1087,9 @@ impl eframe::App for DesktopApp {
         let mut prompt_to_send = None;
         let mut choose_sequence = false;
         let mut toggle_recording = false;
+        let mut toggle_auto_listening = false;
         let mut toggle_avatar = false;
+        let selected_input_device_before = self.selected_input_device.clone();
         let avatar_size_before = self.config.avatar_size;
         let avatar_height_before = self.config.avatar_height;
         egui::CentralPanel::default()
@@ -1149,6 +1326,19 @@ impl eframe::App for DesktopApp {
                         {
                             toggle_recording = true;
                         }
+                        if ui
+                            .add_enabled(
+                                !self.recording && !self.request_running,
+                                egui::Button::new(if self.auto_listening {
+                                    "Pausar escucha automática"
+                                } else {
+                                    "Reanudar escucha"
+                                }),
+                            )
+                            .clicked()
+                        {
+                            toggle_auto_listening = true;
+                        }
                         if ui.button("Recargar caras").clicked() {
                             self.reload_avatar(ctx);
                         }
@@ -1156,26 +1346,28 @@ impl eframe::App for DesktopApp {
                     });
                     ui.horizontal(|ui| {
                         ui.label("Micrófono:");
-                        egui::ComboBox::from_id_salt("input-device")
-                            .selected_text(if self.selected_input_device.is_empty() {
-                                default_input_device_label()
-                            } else {
-                                self.selected_input_device.as_str()
-                            })
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.selected_input_device,
-                                    String::new(),
-                                    default_input_device_label(),
-                                );
-                                for device in &self.input_devices {
+                        ui.add_enabled_ui(!self.recording, |ui| {
+                            egui::ComboBox::from_id_salt("input-device")
+                                .selected_text(if self.selected_input_device.is_empty() {
+                                    default_input_device_label()
+                                } else {
+                                    self.selected_input_device.as_str()
+                                })
+                                .show_ui(ui, |ui| {
                                     ui.selectable_value(
                                         &mut self.selected_input_device,
-                                        device.clone(),
-                                        device,
+                                        String::new(),
+                                        default_input_device_label(),
                                     );
-                                }
-                            });
+                                    for device in &self.input_devices {
+                                        ui.selectable_value(
+                                            &mut self.selected_input_device,
+                                            device.clone(),
+                                            device,
+                                        );
+                                    }
+                                });
+                        });
                         if ui.button("Actualizar lista").clicked() {
                             match input_device_names() {
                                 Ok(devices) => {
@@ -1186,12 +1378,16 @@ impl eframe::App for DesktopApp {
                             }
                         }
                     });
-                    if self.recording
+                    if (self.recording || self.auto_listening)
                         && let Some(audio) = &self.audio
                     {
-                        ui.add(
-                            egui::ProgressBar::new(audio.input_level()).text("Nivel del micrófono"),
-                        );
+                        ui.add(egui::ProgressBar::new(audio.input_level()).text(
+                            if self.recording {
+                                "Nivel del micrófono"
+                            } else {
+                                "Nivel · habla para activar"
+                            },
+                        ));
                     }
                     if let Some(error) = &self.audio_error {
                         ui.colored_label(egui::Color32::LIGHT_RED, format!("Micrófono: {error}"));
@@ -1213,6 +1409,22 @@ impl eframe::App for DesktopApp {
 
         if toggle_recording {
             self.toggle_recording();
+        }
+        if selected_input_device_before != self.selected_input_device && self.auto_listening {
+            self.audio = None;
+            self.speech_detector.reset();
+            match self.open_audio_input() {
+                Ok(()) => self.status = "Escucha automática activa. Habla cuando quieras.".into(),
+                Err(err) => {
+                    let message = format!("{err:#}");
+                    self.audio_error = Some(message.clone());
+                    self.status = format!("No se pudo activar la escucha automática: {message}");
+                    self.auto_listening = false;
+                }
+            }
+        }
+        if toggle_auto_listening {
+            self.toggle_auto_listening();
         }
         if toggle_avatar {
             self.avatar_visible = !self.avatar_visible;
@@ -1244,16 +1456,94 @@ impl eframe::App for DesktopApp {
         if let Some(prompt) = prompt_to_send {
             self.send_prompt(prompt);
         }
-        if self.avatar_textures.len() > 1
+        let animation_active = self.avatar_visible
+            && self.avatar_textures.len() > 1
             && !matches!(
                 self.face_state(),
                 FaceState::Idle | FaceState::Error | FaceState::Warmup
-            )
-        {
+            );
+        if self.auto_listening || self.recording || self.request_running || animation_active {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else {
-            ctx.request_repaint_after(Duration::from_millis(50));
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
+    }
+}
+
+#[cfg(test)]
+mod automatic_speech_tests {
+    use super::{AutomaticSpeechDetector, VOICE_ACTIVITY_THRESHOLD, VoiceActivity};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn starts_only_after_sustained_speech() {
+        let start = Instant::now();
+        let mut detector = AutomaticSpeechDetector::default();
+
+        assert_eq!(
+            detector.update(start, VOICE_ACTIVITY_THRESHOLD, false),
+            None
+        );
+        assert_eq!(
+            detector.update(
+                start + Duration::from_millis(149),
+                VOICE_ACTIVITY_THRESHOLD,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            detector.update(
+                start + Duration::from_millis(150),
+                VOICE_ACTIVITY_THRESHOLD,
+                false
+            ),
+            Some(VoiceActivity::Started)
+        );
+    }
+
+    #[test]
+    fn finishes_after_two_seconds_of_silence_and_resets_if_speech_resumes() {
+        let start = Instant::now();
+        let mut detector = AutomaticSpeechDetector::default();
+
+        assert_eq!(detector.update(start, 0.0, true), None);
+        assert_eq!(
+            detector.update(
+                start + Duration::from_secs(2) - Duration::from_millis(1),
+                0.0,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            detector.update(
+                start + Duration::from_secs(2),
+                VOICE_ACTIVITY_THRESHOLD,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            detector.update(
+                start + Duration::from_secs(2) + Duration::from_millis(1),
+                0.0,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            detector.update(start + Duration::from_secs(4), 0.0, true),
+            None
+        );
+        assert_eq!(
+            detector.update(
+                start + Duration::from_secs(4) + Duration::from_millis(1),
+                0.0,
+                true
+            ),
+            Some(VoiceActivity::Finished)
+        );
     }
 }
 

@@ -7,7 +7,7 @@ Mondo es mi asistente de escritorio. Puede conversar por texto o voz, responder 
 Para usar Mondo, necesitas tener Ollama instalado y abierto. También tienes que descargar el modelo que aparece en `config.txt`. Por ejemplo:
 
 ```powershell
-ollama pull llama3.2:1b
+ollama pull qwen2.5:3b
 ```
 
 Si tienes el ZIP portable, descomprímelo completo en una carpeta y abre `Mondo.exe`. No necesitas instalar Rust ni compilar nada.
@@ -29,13 +29,14 @@ Copy-Item .\src\whisper.cpp\models\ggml-base-q5_1.bin .\whisper\
 ## Cómo lo uso
 
 - **Chat:** presiona `Ctrl+F` para abrirlo y vuelve a presionar `Ctrl+F` o `Esc` para cerrarlo.
-- **Hablar:** mantén presionado el atajo de voz mientras hablas y suéltalo al terminar. También puedes usar el botón **Hablar**.
+- **Hablar sin pulsar:** por defecto, Mondo escucha automáticamente. Habla con el micrófono y, cuando termines, espera dos segundos de silencio: enviará la consulta a Whisper y responderá. Puedes pausar o reanudar la escucha automática desde el chat.
+- **Hablar manualmente:** mantén presionado el atajo de voz mientras hablas y suéltalo al terminar. También puedes usar el botón **Hablar**.
 - **Pantalla completa:** el botón muestra solo la cara. Presiona `F11` o `Esc` para volver.
 - **Cambiar la cara:** usa **Elegir caras** para seleccionar imágenes. Mondo las ordena por nombre de archivo. También puedes estirar la cara con el mouse; el tamaño se guarda en `config.txt`.
 - **Ocultar la cara:** usa `Alt+Shift+P` o el atajo que hayas configurado.
 - **Abrir una aplicación por voz:** di, por ejemplo, «abrí Chrome» o «abrí Calculadora». Para cerrarla, di «cerrá Chrome». Si hay más de una coincidencia, Mondo te pide que aclares cuál.
 
-Mientras hablas, Mondo muestra fragmentos de lo que reconoce. Cuando terminas, envía el texto a Ollama y muestra la respuesta en el chat. Si está activada la voz, también la lee en voz alta.
+En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y luego transcribe y envía la consulta a Ollama. En modo manual muestra fragmentos de lo que reconoce mientras hablas. Muestra la respuesta en el chat y, si está activada la voz, también la lee en voz alta.
 
 La voz y el reconocimiento se procesan localmente. Ollama debe estar abierto; puede estar en esta computadora o en otra a la que tengas acceso por red.
 
@@ -75,26 +76,26 @@ Las imágenes de la carpeta `FACES` se usan automáticamente con la configuraci�
 
 ## Reconocimiento de voz y micrófono
 
-La primera vez, el sistema puede pedir permiso para usar el micrófono. Si no entra audio, elige otro dispositivo en el menú **Micrófono** y revisa la barra de nivel.
+La primera vez, el sistema puede pedir permiso para usar el micrófono. La escucha automática se activa al iniciar Mondo y mantiene abierto el micrófono; usa **Pausar escucha automática** cuando no quieras que escuche. Si no entra audio o no detecta tu voz, elige otro dispositivo en el menú **Micrófono** y revisa la barra de nivel.
 
 En Windows, habilita el acceso al micrófono para aplicaciones de escritorio en **Configuración > Privacidad y seguridad > Micrófono**. En Linux, revisa los permisos de ALSA o PipeWire.
 
-Mondo envía fragmentos de audio de hasta cuatro segundos a Whisper mientras escucha. Usa archivos temporales y no guarda una grabación permanente.
+En escucha automática, Mondo conserva solo unos 300 ms de audio reciente en memoria para no cortar el comienzo de las palabras. Al detectar dos segundos de silencio, transcribe el turno completo con Whisper. Los WAV temporales se eliminan al terminar; no se guarda una grabación permanente.
 
 ## Linux y Raspberry Pi
 
-Mondo necesita una sesión gráfica de escritorio. En Raspberry Pi, recomiendo una Pi 5 con Raspberry Pi OS de 64 bits y 8 GB de memoria. Ollama puede ejecutarse en la misma computadora o en otra.
+Mondo necesita una sesión gráfica de escritorio. También puede compilarse para Raspberry Pi 3B (ARM de 32 o 64 bits); en ese modelo, por sus 1 GB de memoria, conviene ejecutar Ollama en otra computadora accesible por red. Una Pi 5 con Raspberry Pi OS de 64 bits ofrece más velocidad.
 
 En Debian, Ubuntu o Raspberry Pi OS, instala las dependencias:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake pkg-config libasound2-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
+sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libwayland-dev libudev-dev libssl-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Para cerrar aplicaciones por voz en X11, instala también `wmctrl`. Esa función no está disponible en Wayland. Algunos escritorios Wayland tampoco permiten atajos globales; en ese caso, usa el botón **Hablar**.
 
-Instala Rust y compila Mondo y Whisper:
+Instala Rust estable y compila Mondo y Whisper:
 
 ```bash
 cargo build --release
@@ -107,6 +108,22 @@ cp src/whisper.cpp/models/ggml-base-q5_1.bin whisper/
 ```
 
 Después, ejecuta `target/release/Mondo` desde el escritorio. Si la computadora tiene poca memoria o es lenta, puedes usar un modelo Whisper más pequeño y cambiar `whisper_model` en `config.txt`.
+
+### Ajustes para Raspberry Pi 3B
+
+En una Pi 3B usa el modelo compacto `tiny-q5_1` para reconocimiento y deja Ollama en otra computadora. Para reducir la memoria necesaria durante la compilación, ejecuta desde la carpeta del proyecto:
+
+```bash
+CARGO_BUILD_JOBS=1 cargo build --release
+cmake -S src/whisper.cpp -B src/whisper.cpp/build -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_EXAMPLES=ON -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=ON
+cmake --build src/whisper.cpp/build --target whisper-server --parallel 1
+bash src/whisper.cpp/models/download-ggml-model.sh tiny-q5_1
+mkdir -p whisper
+cp src/whisper.cpp/build/bin/whisper-server whisper/
+cp src/whisper.cpp/models/ggml-tiny-q5_1.bin whisper/
+```
+
+En instalaciones nuevas de ARM, la configuración inicial usa 2 hilos, búsqueda mínima y el modelo `tiny-q5_1`. Si ya existe `config.txt`, cambia `whisper_threads=2`, `whisper_beam_size=1` y `whisper_model=whisper/ggml-tiny-q5_1.bin`. Para compilar cruzado, usa `armv7-unknown-linux-gnueabihf` en Raspberry Pi OS de 32 bits o `aarch64-unknown-linux-gnu` en 64 bits, junto con el toolchain y sysroot correspondientes; compila Whisper de forma nativa en la Pi.
 
 ## Crear el ZIP portable de Windows
 

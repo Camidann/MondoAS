@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
@@ -10,6 +11,7 @@ use tempfile::Builder;
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const LIVE_WINDOW_SECONDS: u32 = 4;
+const PRE_ROLL_MILLISECONDS: usize = 300;
 
 pub struct AudioTempFile {
     path: PathBuf,
@@ -37,6 +39,7 @@ impl Drop for AudioTempFile {
 pub struct AudioInput {
     recording: Arc<AtomicBool>,
     samples: Arc<Mutex<Vec<f32>>>,
+    pre_roll: Arc<Mutex<VecDeque<f32>>>,
     level: Arc<AtomicU32>,
     stream_error: Arc<Mutex<Option<String>>>,
     _stream: cpal::Stream,
@@ -61,14 +64,16 @@ impl AudioSnapshotSource {
     }
 
     pub fn snapshot_wav(&self) -> Result<AudioTempFile> {
-        let captured = self
-            .samples
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?
-            .clone();
         let window_size = self.sample_rate as usize * self.channels * LIVE_WINDOW_SECONDS as usize;
-        let first_sample = captured.len().saturating_sub(window_size);
-        let mono = downmix(&captured[first_sample..], self.channels);
+        let recent_samples = {
+            let captured = self
+                .samples
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?;
+            let first_sample = captured.len().saturating_sub(window_size);
+            captured[first_sample..].to_vec()
+        };
+        let mono = downmix(&recent_samples, self.channels);
         let resampled = resample(&mono, self.sample_rate, WHISPER_SAMPLE_RATE);
         let cleaned = clean_audio(&resampled);
         write_wav(&cleaned)
@@ -120,6 +125,8 @@ impl AudioInput {
         let config = supported_config.config();
         let recording = Arc::new(AtomicBool::new(false));
         let samples = Arc::new(Mutex::new(Vec::new()));
+        let pre_roll = Arc::new(Mutex::new(VecDeque::new()));
+        let pre_roll_capacity = sample_rate as usize * channels * PRE_ROLL_MILLISECONDS / 1000;
         let level = Arc::new(AtomicU32::new(0.0f32.to_bits()));
         let stream_error = Arc::new(Mutex::new(None));
 
@@ -127,12 +134,21 @@ impl AudioInput {
             cpal::SampleFormat::F32 => {
                 let recording = Arc::clone(&recording);
                 let samples = Arc::clone(&samples);
+                let pre_roll = Arc::clone(&pre_roll);
                 let level = Arc::clone(&level);
                 let stream_error = Arc::clone(&stream_error);
                 device.build_input_stream(
                     &config,
                     move |data: &[f32], _| {
-                        store_samples(data, &recording, &samples, &level, |x| *x)
+                        store_samples(
+                            data,
+                            &recording,
+                            &samples,
+                            &pre_roll,
+                            pre_roll_capacity,
+                            &level,
+                            |x| *x,
+                        )
                     },
                     move |error| report_audio_error(error, &stream_error),
                     None,
@@ -141,12 +157,21 @@ impl AudioInput {
             cpal::SampleFormat::I16 => {
                 let recording = Arc::clone(&recording);
                 let samples = Arc::clone(&samples);
+                let pre_roll = Arc::clone(&pre_roll);
                 let level = Arc::clone(&level);
                 let stream_error = Arc::clone(&stream_error);
                 device.build_input_stream(
                     &config,
                     move |data: &[i16], _| {
-                        store_samples(data, &recording, &samples, &level, |x| *x as f32 / 32768.0)
+                        store_samples(
+                            data,
+                            &recording,
+                            &samples,
+                            &pre_roll,
+                            pre_roll_capacity,
+                            &level,
+                            |x| *x as f32 / 32768.0,
+                        )
                     },
                     move |error| report_audio_error(error, &stream_error),
                     None,
@@ -155,14 +180,21 @@ impl AudioInput {
             cpal::SampleFormat::U16 => {
                 let recording = Arc::clone(&recording);
                 let samples = Arc::clone(&samples);
+                let pre_roll = Arc::clone(&pre_roll);
                 let level = Arc::clone(&level);
                 let stream_error = Arc::clone(&stream_error);
                 device.build_input_stream(
                     &config,
                     move |data: &[u16], _| {
-                        store_samples(data, &recording, &samples, &level, |x| {
-                            (*x as f32 - 32768.0) / 32768.0
-                        })
+                        store_samples(
+                            data,
+                            &recording,
+                            &samples,
+                            &pre_roll,
+                            pre_roll_capacity,
+                            &level,
+                            |x| (*x as f32 - 32768.0) / 32768.0,
+                        )
                     },
                     move |error| report_audio_error(error, &stream_error),
                     None,
@@ -179,6 +211,7 @@ impl AudioInput {
         Ok(Self {
             recording,
             samples,
+            pre_roll,
             level,
             stream_error,
             _stream: stream,
@@ -196,8 +229,33 @@ impl AudioInput {
             .lock()
             .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?
             .clear();
+        self.pre_roll
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?
+            .clear();
         self.recording.store(true, Ordering::Relaxed);
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub fn start_with_pre_roll(&self) -> Result<()> {
+        if self.recording.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let mut pre_roll = self
+            .pre_roll
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?;
+        let mut samples = self
+            .samples
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?;
+        samples.clear();
+        samples.extend(pre_roll.iter().copied());
+        pre_roll.clear();
+        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+        self.recording.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -316,25 +374,45 @@ fn store_samples<T>(
     input: &[T],
     recording: &AtomicBool,
     samples: &Mutex<Vec<f32>>,
+    pre_roll: &Mutex<VecDeque<f32>>,
+    pre_roll_capacity: usize,
     level: &AtomicU32,
     convert: impl Fn(&T) -> f32,
 ) {
-    if !recording.load(Ordering::Relaxed) {
-        return;
+    let mut converted = Vec::with_capacity(input.len());
+    let mut sum_squares = 0.0;
+    for value in input {
+        let sample = convert(value);
+        sum_squares += sample * sample;
+        converted.push(sample);
     }
-    let Ok(mut samples) = samples.lock() else {
-        return;
-    };
-    if !recording.load(Ordering::Relaxed) {
+    let rms = (sum_squares / input.len().max(1) as f32).sqrt();
+    level.store(rms.to_bits(), Ordering::Relaxed);
+
+    if recording.load(Ordering::Relaxed) {
+        if let Ok(mut samples) = samples.lock()
+            && recording.load(Ordering::Relaxed)
+        {
+            samples.extend(converted);
+        }
         return;
     }
 
-    let converted = input.iter().map(convert).collect::<Vec<_>>();
-    let rms = (converted.iter().map(|sample| sample * sample).sum::<f32>()
-        / converted.len().max(1) as f32)
-        .sqrt();
-    level.store(rms.to_bits(), Ordering::Relaxed);
-    samples.extend(converted);
+    if let Ok(mut pre_roll) = pre_roll.lock() {
+        if recording.load(Ordering::Relaxed) {
+            drop(pre_roll);
+            if let Ok(mut samples) = samples.lock()
+                && recording.load(Ordering::Relaxed)
+            {
+                samples.extend(converted);
+            }
+            return;
+        }
+        pre_roll.extend(converted);
+        while pre_roll.len() > pre_roll_capacity {
+            pre_roll.pop_front();
+        }
+    }
 }
 
 fn report_audio_error(error: cpal::StreamError, last_error: &Mutex<Option<String>>) {
@@ -379,9 +457,38 @@ fn resample(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
 mod tests {
     use super::{
         AudioSnapshotSource, LIVE_WINDOW_SECONDS, WHISPER_SAMPLE_RATE, clean_audio, downmix,
-        resample, write_wav,
+        resample, store_samples, write_wav,
     };
-    use std::sync::{Arc, Mutex};
+    use std::collections::VecDeque;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU32, Ordering},
+    };
+
+    #[test]
+    fn idle_audio_detection_keeps_only_recent_samples_and_updates_level() {
+        let recording = AtomicBool::new(false);
+        let samples = Mutex::new(Vec::new());
+        let pre_roll = Mutex::new(VecDeque::new());
+        let level = AtomicU32::new(0.0f32.to_bits());
+
+        store_samples(
+            &[0.1, 0.2, 0.3],
+            &recording,
+            &samples,
+            &pre_roll,
+            2,
+            &level,
+            |sample| *sample,
+        );
+
+        assert_eq!(
+            pre_roll.lock().unwrap().iter().copied().collect::<Vec<_>>(),
+            vec![0.2, 0.3]
+        );
+        assert!(samples.lock().unwrap().is_empty());
+        assert!((f32::from_bits(level.load(Ordering::Relaxed)) - 0.216_024_68).abs() < 0.0001);
+    }
 
     #[test]
     fn downmix_averages_interleaved_channels() {
