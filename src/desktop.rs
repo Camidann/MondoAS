@@ -887,10 +887,9 @@ impl DesktopApp {
                             }
                         }
                         Err(err) => {
-                            let _ = tx
-                                .send(AppEvent::Status(format!("Error de transcripción: {err:#}")));
-                            let _ = tx
-                                .send(AppEvent::Reply("No pude transcribir el audio.".to_string()));
+                            let message = format!("No pude transcribir el audio: {err:#}");
+                            let _ = tx.send(AppEvent::Status(message.clone()));
+                            let _ = tx.send(AppEvent::Reply(message));
                             let _ = tx.send(AppEvent::Finished);
                         }
                     }
