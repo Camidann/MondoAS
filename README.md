@@ -77,7 +77,7 @@ Estas son las opciones principales:
 
 Los atajos deben ser distintos. Puedes escribir combinaciones como `CTRL+F9` o `ALT+SHIFT+M`. Si el sistema no permite registrar un atajo global, usa el botón de la ventana.
 
-Las imágenes de la carpeta `FACES` se usan automáticamente con la configuración predeterminada. Los nombres indican cuándo se muestran: `idle` para reposo, `capturing` al empezar a grabar, `listen` mientras escucha, `thinking` mientras espera la respuesta, `speaking` al hablar, `warmup` durante la transcripción y `error` cuando ocurre un problema. Las imágenes numeradas se reproducen en orden alfabético.
+Las imágenes de la carpeta `FACES` se usan automáticamente con la configuración predeterminada. Los nombres indican cuándo se muestran: `idle` para reposo, `sleep` o `dorm` para dormir tras 20 segundos de inactividad, `capturing` al empezar a grabar, `listen` mientras escucha, `thinking` mientras espera la respuesta, `speaking` al hablar, `warmup` durante la transcripción y `error` cuando ocurre un problema. Las imágenes numeradas se reproducen en orden alfabético.
 
 ## Reconocimiento de voz y micrófono
 
@@ -108,7 +108,7 @@ pipx install piper-tts
 pipx ensurepath
 ```
 
-En Raspberry Pi OS de 32 bits, usa el paquete `armv7` de la [guía oficial](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md#binary-releases). Comprueba que `command -v piper` encuentre el ejecutable desde la misma sesión de escritorio que inicia Mondo. Después, descarga una voz en español junto a su archivo de configuración:
+En Raspberry Pi OS de 32 bits, usa el paquete `armv7` de la [guía oficial](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md#binary-releases). Si lo instalaste con `pipx`, Mondo también busca el ejecutable en `~/.local/bin/piper`, incluso si el escritorio no hereda esa ruta. Después, descarga una voz en español junto a su archivo de configuración:
 
 ```bash
 mkdir -p voices
@@ -116,7 +116,7 @@ curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude
 curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json -o voices/es_MX-claude-high.onnx.json
 ```
 
-En `config.txt`, deja `voice_name=` vacío, configura `piper_model=voices/es_MX-claude-high.onnx` y activa `speech_enabled=true`. Para desactivar la lectura en voz alta, vuelve a ponerlo en `false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
+En `config.txt`, deja `voice_name=` vacío, configura `piper_model=voices/es_MX-claude-high.onnx` y activa `speech_enabled=true`. Tanto el modelo como su archivo `.onnx.json` deben estar en esa ruta relativa a la carpeta de `config.txt`. En esta configuración, `piper_model=..\bmo.onnx`, así que en la Raspberry copia `bmo.onnx` y `bmo.onnx.json` al directorio padre de `config.txt`, o cambia la opción a la ubicación donde los guardaste. Para desactivar la lectura en voz alta, vuelve a poner `speech_enabled=false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
 
 Instala Rust estable y compila Mondo y Whisper:
 q

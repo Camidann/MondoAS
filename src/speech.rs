@@ -2,7 +2,10 @@ use anyhow::{Context, Result, bail};
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 #[cfg(target_os = "linux")]
-use std::{path::Path, process::Stdio};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+};
 use tokio::process::Command;
 
 pub async fn speak(text: &str, voice_name: &str, piper_model: &std::path::Path) -> Result<()> {
@@ -107,11 +110,17 @@ pub async fn speak(text: &str, voice_name: &str, piper_model: &std::path::Path) 
 async fn speak_with_piper(text: &str, model: &Path) -> Result<()> {
     let mut model_config = model.as_os_str().to_os_string();
     model_config.push(".json");
-    let model_config = std::path::PathBuf::from(model_config);
-    if !model.is_file() || !model_config.is_file() {
+    let model_config = PathBuf::from(model_config);
+    if !model.is_file() {
         bail!(
-            "No se encontró la voz de Piper en {} (o falta su archivo .json). Instala la voz en esa ruta o configura piper_model.",
+            "No se encontró el modelo de voz Piper: {}. `piper_model` se resuelve respecto de la carpeta de config.txt.",
             model.display()
+        );
+    }
+    if !model_config.is_file() {
+        bail!(
+            "Falta el archivo de configuración de la voz Piper: {}. Copia junto al modelo su archivo `.onnx.json`.",
+            model_config.display()
         );
     }
 
@@ -119,7 +128,8 @@ async fn speak_with_piper(text: &str, model: &Path) -> Result<()> {
         .suffix(".wav")
         .tempfile()
         .context("No se pudo crear el archivo temporal de Piper")?;
-    let mut child = Command::new("piper")
+    let piper_binary = piper_binary();
+    let mut child = Command::new(&piper_binary)
         .args(["--model"])
         .arg(model)
         .args(["--output_file"])
@@ -129,7 +139,12 @@ async fn speak_with_piper(text: &str, model: &Path) -> Result<()> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .context("No se pudo iniciar Piper. Instala el ejecutable piper y asegúrate de que esté en PATH.")?;
+        .with_context(|| {
+            format!(
+                "No se pudo iniciar Piper (`{}`). Instálalo y verifica que esté en PATH o en `~/.local/bin/piper`.",
+                piper_binary.display()
+            )
+        })?;
     let mut stdin = child
         .stdin
         .take()
@@ -164,6 +179,17 @@ async fn speak_with_piper(text: &str, model: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn piper_binary() -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        let pipx_binary = PathBuf::from(home).join(".local").join("bin").join("piper");
+        if pipx_binary.is_file() {
+            return pipx_binary;
+        }
+    }
+    PathBuf::from("piper")
 }
 
 #[cfg(target_os = "linux")]

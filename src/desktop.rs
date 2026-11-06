@@ -36,6 +36,7 @@ enum AppEvent {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FaceState {
     Idle,
+    Sleeping,
     Listening,
     Thinking,
     Speaking,
@@ -43,6 +44,7 @@ enum FaceState {
     Warmup,
 }
 
+const FACE_SLEEP_AFTER: f64 = 20.0;
 const VOICE_ACTIVITY_THRESHOLD: f32 = 0.006;
 const VOICE_START_CONFIRMATION: Duration = Duration::from_millis(200);
 const VOICE_END_SILENCE: Duration = Duration::from_secs(2);
@@ -51,6 +53,10 @@ const VOICE_END_SILENCE: Duration = Duration::from_secs(2);
 enum VoiceActivity {
     Started,
     Finished,
+}
+
+fn has_been_idle(now: f64, last_activity: f64) -> bool {
+    now - last_activity >= FACE_SLEEP_AFTER
 }
 
 #[derive(Default)]
@@ -113,6 +119,7 @@ fn default_input_device_label() -> &'static str {
 
 struct FaceAnimation {
     idle_frame: usize,
+    sleeping_frame: Option<usize>,
     blink_frame: Option<usize>,
     capturing_frames: Vec<usize>,
     listening_frames: Vec<usize>,
@@ -137,6 +144,7 @@ impl FaceAnimation {
     fn new(paths: &[std::path::PathBuf]) -> Self {
         let mut animation = Self {
             idle_frame: 0,
+            sleeping_frame: None,
             blink_frame: None,
             capturing_frames: Vec::new(),
             listening_frames: Vec::new(),
@@ -163,7 +171,12 @@ impl FaceAnimation {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_lowercase();
-            if ["idle", "normal", "reposo", "base"]
+            if ["sleep", "dorm", "zzz"]
+                .iter()
+                .any(|tag| name.contains(tag))
+            {
+                animation.sleeping_frame.get_or_insert(index);
+            } else if ["idle", "normal", "reposo", "base"]
                 .iter()
                 .any(|tag| name.contains(tag))
             {
@@ -206,16 +219,23 @@ impl FaceAnimation {
             }
         }
 
-        if !paths.is_empty()
-            && animation.idle_frame == 0
-            && !paths[0]
+        if !paths.is_empty() && animation.idle_frame == 0 {
+            let first_name = paths[0]
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy()
-                .to_lowercase()
-                .contains("idle")
-        {
-            animation.idle_frame = animation.fallback_frames.first().copied().unwrap_or(0);
+                .to_lowercase();
+            if !["idle", "normal", "reposo", "base"]
+                .iter()
+                .any(|tag| first_name.contains(tag))
+            {
+                animation.idle_frame = animation
+                    .fallback_frames
+                    .first()
+                    .or(animation.sleeping_frame.as_ref())
+                    .copied()
+                    .unwrap_or(0);
+            }
         }
         animation
     }
@@ -246,6 +266,9 @@ impl FaceAnimation {
                         self.idle_frame
                     };
                 }
+            }
+            FaceState::Sleeping => {
+                self.current_frame = self.sleeping_frame.unwrap_or(self.idle_frame);
             }
             FaceState::Listening => {
                 if now - self.capturing_since < 0.55 && !self.capturing_frames.is_empty() {
@@ -284,6 +307,7 @@ impl FaceAnimation {
     fn frame_for_state(&self, state: FaceState) -> usize {
         match state {
             FaceState::Idle => self.idle_frame,
+            FaceState::Sleeping => self.sleeping_frame.unwrap_or(self.idle_frame),
             FaceState::Listening => self
                 .capturing_frames
                 .first()
@@ -343,6 +367,7 @@ pub struct DesktopApp {
     live_transcription: Option<JoinHandle<()>>,
     live_transcript: String,
     request_running: bool,
+    last_activity_time: Option<f64>,
     speaking: Arc<AtomicBool>,
     avatar_visible: bool,
     avatar_textures: Vec<egui::TextureHandle>,
@@ -486,6 +511,7 @@ impl DesktopApp {
             live_transcription: None,
             live_transcript: String::new(),
             request_running: false,
+            last_activity_time: None,
             speaking: Arc::new(AtomicBool::new(false)),
             avatar_textures,
             face_animation: FaceAnimation::new(&avatar_paths),
@@ -623,6 +649,24 @@ impl DesktopApp {
             FaceState::Thinking
         } else {
             FaceState::Idle
+        }
+    }
+
+    fn displayed_face_state(&mut self, now: f64) -> FaceState {
+        let state = self.face_state();
+        if matches!(
+            state,
+            FaceState::Listening | FaceState::Warmup | FaceState::Thinking | FaceState::Speaking
+        ) {
+            self.last_activity_time = Some(now);
+            return state;
+        }
+
+        let last_activity = *self.last_activity_time.get_or_insert(now);
+        if self.face_animation.sleeping_frame.is_some() && has_been_idle(now, last_activity) {
+            FaceState::Sleeping
+        } else {
+            state
         }
     }
 
@@ -1059,6 +1103,8 @@ impl eframe::App for DesktopApp {
         self.poll_events();
         self.poll_audio_error();
         self.poll_automatic_speech();
+        let time = ctx.input(|input| input.time);
+        let face_state = self.displayed_face_state(time);
 
         let mut toggle_fullscreen =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F11));
@@ -1091,8 +1137,7 @@ impl eframe::App for DesktopApp {
                 if self.fullscreen {
                     ui.centered_and_justified(|ui| {
                         if self.avatar_visible {
-                            let time = ctx.input(|input| input.time);
-                            let frame_index = self.face_animation.frame(time, self.face_state());
+                            let frame_index = self.face_animation.frame(time, face_state);
                             if let Some(texture) = self.avatar_textures.get(frame_index) {
                                 let available = ui.available_size();
                                 let image_size = texture.size_vec2();
@@ -1166,8 +1211,6 @@ impl eframe::App for DesktopApp {
                     ui.add_space(vertical_space);
                     ui.vertical_centered(|ui| {
                         if self.avatar_visible {
-                            let time = ctx.input(|input| input.time);
-                            let face_state = self.face_state();
                             let frame_index = self.face_animation.frame(time, face_state);
                             let resized_size = egui::Resize::default()
                                 .id_salt("avatar-face-resize")
@@ -1452,8 +1495,8 @@ impl eframe::App for DesktopApp {
         let animation_active = self.avatar_visible
             && self.avatar_textures.len() > 1
             && !matches!(
-                self.face_state(),
-                FaceState::Idle | FaceState::Error | FaceState::Warmup
+                face_state,
+                FaceState::Idle | FaceState::Sleeping | FaceState::Error | FaceState::Warmup
             );
         if self.auto_listening || self.recording || self.request_running || animation_active {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -1542,7 +1585,7 @@ mod automatic_speech_tests {
 
 #[cfg(test)]
 mod face_animation_tests {
-    use super::{FaceAnimation, FaceState};
+    use super::{FaceAnimation, FaceState, has_been_idle};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -1600,6 +1643,26 @@ mod face_animation_tests {
         assert_eq!(animation.frame(5.2, FaceState::Speaking), 7);
         assert_eq!(animation.frame(3.6, FaceState::Error), 8);
         assert_eq!(animation.frame(3.9, FaceState::Warmup), 9);
+    }
+
+    #[test]
+    fn shows_sleep_face_and_returns_to_awake_state() {
+        let paths = ["idle.png", "sleeping.png", "listen.png"]
+            .into_iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        let mut animation = FaceAnimation::new(&paths);
+
+        assert_eq!(animation.frame(0.0, FaceState::Idle), 0);
+        assert_eq!(animation.frame(20.0, FaceState::Sleeping), 1);
+        assert_eq!(animation.frame(21.0, FaceState::Sleeping), 1);
+        assert_eq!(animation.frame(22.0, FaceState::Listening), 2);
+    }
+
+    #[test]
+    fn sleep_starts_at_twenty_seconds_of_inactivity() {
+        assert!(!has_been_idle(19.999, 0.0));
+        assert!(has_been_idle(20.0, 0.0));
     }
 
     #[test]
