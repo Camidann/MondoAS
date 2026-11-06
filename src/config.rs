@@ -310,7 +310,7 @@ impl AgentConfig {
             whisper_beam_size: default_whisper_beam_size(),
             whisper_server_bin: default_whisper_server_path(),
             whisper_model: PathBuf::from("whisper").join(default_whisper_model_filename()),
-            piper_model: PathBuf::from("voices").join("es_MX-claude-high.onnx"),
+            piper_model: PathBuf::from("es_MX-ald-medium.onnx"),
             avatar_file: PathBuf::from("avatar.png"),
             avatar_sequence: Vec::new(),
             avatar_enabled: true,
@@ -342,7 +342,7 @@ impl AgentConfig {
          whisper_beam_size={}\n\
          whisper_server_bin={}\n\
          whisper_model=whisper\\{}\n\
-         piper_model=voices\\es_MX-claude-high.onnx\n\
+         piper_model=es_MX-ald-medium.onnx\n\
          avatar_file=avatar.png\n\
          avatar_sequence=\n\
          avatar_enabled=true\n\
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn resolves_configured_piper_voice_path() {
         let config = AgentConfig::parse(
-            "piper_model=voices\\es_MX-claude-high.onnx\n",
+            "piper_model=es_MX-ald-medium.onnx\n",
             PathBuf::from("portable"),
             PathBuf::from("portable\\config.txt"),
         )
@@ -673,9 +673,7 @@ mod tests {
 
         assert_eq!(
             config.piper_model,
-            PathBuf::from("portable")
-                .join("voices")
-                .join("es_MX-claude-high.onnx")
+            PathBuf::from("portable").join("es_MX-ald-medium.onnx")
         );
     }
 

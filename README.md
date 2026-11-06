@@ -108,15 +108,14 @@ pipx install piper-tts
 pipx ensurepath
 ```
 
-En Raspberry Pi OS de 32 bits, usa el paquete `armv7` de la [guía oficial](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md#binary-releases). Si lo instalaste con `pipx`, Mondo también busca el ejecutable en `~/.local/bin/piper`, incluso si el escritorio no hereda esa ruta. Después, descarga una voz en español junto a su archivo de configuración:
+En Raspberry Pi OS de 32 bits, usa el paquete `armv7` de la [guía oficial](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md#binary-releases). Si lo instalaste con `pipx`, Mondo también busca el ejecutable en `~/.local/bin/piper`, incluso si el escritorio no hereda esa ruta. Después, descarga la voz `es_MX-ald-medium` junto a su archivo de configuración, en la carpeta de Mondo:
 
 ```bash
-mkdir -p voices
-curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx -o voices/es_MX-claude-high.onnx
-curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json -o voices/es_MX-claude-high.onnx.json
+curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/ald/medium/es_MX-ald-medium.onnx -o es_MX-ald-medium.onnx
+curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/ald/medium/es_MX-ald-medium.onnx.json -o es_MX-ald-medium.onnx.json
 ```
 
-En `config.txt`, deja `voice_name=` vacío, configura `piper_model=es_AR-daniela-high.onnx` y activa `speech_enabled=true`. Tanto el modelo como su archivo `.onnx.json` deben estar junto a `config.txt` (o ajusta la ruta relativa). La voz Daniela es de Argentina. Para desactivar la lectura en voz alta, vuelve a poner `speech_enabled=false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
+En `config.txt`, deja `voice_name=` vacío, configura `piper_model=es_MX-ald-medium.onnx` y activa `speech_enabled=true`. Tanto el modelo como su archivo `.onnx.json` deben estar junto a `config.txt` (o ajusta la ruta relativa). Esta voz es de español mexicano; si prefieres otra variante, cambia el modelo y su `.json`. Para desactivar la lectura en voz alta, vuelve a poner `speech_enabled=false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
 
 Instala Rust estable y compila Mondo y Whisper:
 q
