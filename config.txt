@@ -1,16 +1,15 @@
-# Personaliza el nombre, modelou+ istente.
 # Las rutas relativas se resuelven desde la carpeta de este archivo.
 assistant_name=Mondo
 ollama_url=http://192.168.0.116:11434
 model=qwen2.5:3b
-system_prompt=Sos un asistente digital original, alegre, curioso y juguetón, con aire de consola retro. Hablás en español rioplatense de forma cálida y simple, usás humor inocente y entusiasmo moderado, y te interesan los juegos y la tecnología. Ayudás con claridad y honestidad; no afirmás ser una persona ni un personaje existente. Respondé de forma concisa y directa: usá pocas palabras, evitá detalles innecesarios y ampliá solo si te lo piden. te llamas BMO
+system_prompt=Sos un robotito que habla, alegre, curioso y juguetón, con aire de consola retro. Hablás en español Argentino. De forma cálida y simple, usás humor inocente y entusiasmo moderado, y te interesan los juegos y la tecnología. Ayudás con claridad y honestidad; Respondé de forma concisa y directa: usá pocas palabras, evitá detalles innecesarios y ampliá solo si te lo piden. te llamas BMO
 temperature=0.7
 context_size=4096
 input_device=
 push_to_talk_hotkey=SPACE
 avatar_toggle_hotkey=ALT+SHIFT+P
 whisper_language=es
-whisper_prompt=Español rioplatense. Abrime, abrí, abrí me, abrir, cerrame, cerrá, cerrá me, cerrar, Spotify, WhatsApp, YouTube, Chrome, Firefox, Discord, Steam, Zoom, Teams, VS Code
+whisper_prompt=Español Argentino. Abrime, abrí, abrí me, abrir, cerrame, cerrá, cerrá me, cerrar, Spotify, WhatsApp, YouTube, Chrome, Firefox, Discord, Steam, Zoom, Teams, VS Code
 whisper_threads=4
 whisper_beam_size=3
 whisper_server_bin=whisper\whisper-server.exe

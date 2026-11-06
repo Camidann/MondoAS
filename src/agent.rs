@@ -12,12 +12,18 @@ use std::{env, process::Command};
 use crate::config::AgentConfig;
 
 #[derive(Debug, Serialize)]
-struct GenerateRequest {
+struct ChatRequest {
     model: String,
-    prompt: String,
+    messages: Vec<ChatMessage>,
     stream: bool,
     keep_alive: &'static str,
     options: GenerateOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct ChatMessage {
+    role: &'static str,
+    content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -28,9 +34,15 @@ struct GenerateOptions {
 }
 
 #[derive(Debug, Deserialize)]
-struct GenerateResponse {
+struct ChatResponse {
     #[serde(default)]
-    response: String,
+    message: ChatResponseMessage,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ChatResponseMessage {
+    #[serde(default)]
+    content: String,
 }
 
 #[derive(Clone)]
@@ -63,22 +75,16 @@ impl Agent {
         }
 
         let url = format!(
-            "{}/api/generate",
+            "{}/api/chat",
             self.config.ollama_url.trim_end_matches('/')
-        );
-
-        let prompt_final = build_prompt(
-            &self.config.system_prompt,
-            prompt,
-            &self.config.assistant_name,
         );
 
         let mut response = self
             .client
             .post(&url)
-            .json(&GenerateRequest {
+            .json(&ChatRequest {
                 model: self.config.model.clone(),
-                prompt: prompt_final,
+                messages: build_messages(&self.config.system_prompt, prompt),
                 stream: true,
                 keep_alive: "30m",
                 options: GenerateOptions {
@@ -121,15 +127,22 @@ impl Agent {
     }
 }
 
-fn build_prompt(system_prompt: &str, user_prompt: &str, assistant_name: &str) -> String {
-    format!(
-        "{system_prompt}\n\n\
-         Instrucción obligatoria de idioma: responde siempre en español rioplatense. \
-         No respondas en portugués, aunque el mensaje del usuario esté en portugués \
-         o la transcripción del audio parezca portuguesa. Si hace falta, interpreta \
-         el mensaje y contesta en español.\n\n\
-         Usuario: {user_prompt}\n{assistant_name}:"
-    )
+fn build_messages(system_prompt: &str, user_prompt: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage {
+            role: "system",
+            content: format!(
+                "{system_prompt}\n\n\
+                 Regla prioritaria de idioma: respondé siempre y exclusivamente en español \
+                 rioplatense. No uses portugués, aunque el usuario escriba o hable en \
+                 portugués. Si no entendés el mensaje, pedí una aclaración en español."
+            ),
+        },
+        ChatMessage {
+            role: "user",
+            content: user_prompt.to_string(),
+        },
+    ]
 }
 
 fn append_stream_response(
@@ -144,11 +157,11 @@ fn append_stream_response(
         return Ok(());
     }
 
-    let response: GenerateResponse =
+    let response: ChatResponse =
         serde_json::from_str(data).context("No se pudo parsear un fragmento de Ollama")?;
-    if !response.response.is_empty() {
-        answer.push_str(&response.response);
-        on_chunk(&response.response);
+    if !response.message.content.is_empty() {
+        answer.push_str(&response.message.content);
+        on_chunk(&response.message.content);
     }
     Ok(())
 }
@@ -819,18 +832,21 @@ mod tests {
     use super::collect_desktop_applications;
     use super::{
         ApplicationAction, ApplicationMatch, append_stream_response, application_match_score,
-        application_request, build_prompt, find_application,
+        application_request, build_messages, find_application,
     };
     use std::path::PathBuf;
 
     #[test]
     fn prompt_requires_rioplatense_spanish_even_if_input_looks_portuguese() {
-        let prompt = build_prompt("Personalidad personalizada.", "Olá, tudo bem?", "Mondo");
+        let messages = build_messages("Personalidad personalizada.", "Olá, tudo bem?");
 
-        assert!(prompt.starts_with("Personalidad personalizada."));
-        assert!(prompt.contains("responde siempre en español rioplatense"));
-        assert!(prompt.contains("No respondas en portugués"));
-        assert!(prompt.contains("Usuario: Olá, tudo bem?\nMondo:"));
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.starts_with("Personalidad personalizada."));
+        assert!(messages[0].content.contains("siempre y exclusivamente en español rioplatense"));
+        assert!(messages[0].content.contains("No uses portugués"));
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content, "Olá, tudo bem?");
     }
 
     #[test]
@@ -977,19 +993,19 @@ mod tests {
         let mut on_chunk = |chunk: &str| chunks.push(chunk.to_string());
 
         append_stream_response(
-            br#"{"response":"Hola","done":false}"#,
+            br#"{"message":{"role":"assistant","content":"Hola"},"done":false}"#,
             &mut answer,
             &mut on_chunk,
         )
         .unwrap();
         append_stream_response(
-            br#"{"response":" mundo","done":false}"#,
+            br#"{"message":{"role":"assistant","content":" mundo"},"done":false}"#,
             &mut answer,
             &mut on_chunk,
         )
         .unwrap();
         append_stream_response(
-            br#"{"response":"","done":true}"#,
+            br#"{"message":{"role":"assistant","content":""},"done":true}"#,
             &mut answer,
             &mut on_chunk,
         )
