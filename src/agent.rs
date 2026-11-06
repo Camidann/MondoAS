@@ -67,9 +67,10 @@ impl Agent {
             self.config.ollama_url.trim_end_matches('/')
         );
 
-        let prompt_final = format!(
-            "{}\n\nUsuario: {}\n{}:",
-            self.config.system_prompt, prompt, self.config.assistant_name
+        let prompt_final = build_prompt(
+            &self.config.system_prompt,
+            prompt,
+            &self.config.assistant_name,
         );
 
         let mut response = self
@@ -118,6 +119,17 @@ impl Agent {
 
         Ok(answer.trim().to_string())
     }
+}
+
+fn build_prompt(system_prompt: &str, user_prompt: &str, assistant_name: &str) -> String {
+    format!(
+        "{system_prompt}\n\n\
+         Instrucción obligatoria de idioma: responde siempre en español rioplatense. \
+         No respondas en portugués, aunque el mensaje del usuario esté en portugués \
+         o la transcripción del audio parezca portuguesa. Si hace falta, interpreta \
+         el mensaje y contesta en español.\n\n\
+         Usuario: {user_prompt}\n{assistant_name}:"
+    )
 }
 
 fn append_stream_response(
@@ -807,9 +819,19 @@ mod tests {
     use super::collect_desktop_applications;
     use super::{
         ApplicationAction, ApplicationMatch, append_stream_response, application_match_score,
-        application_request, find_application,
+        application_request, build_prompt, find_application,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn prompt_requires_rioplatense_spanish_even_if_input_looks_portuguese() {
+        let prompt = build_prompt("Personalidad personalizada.", "Olá, tudo bem?", "Mondo");
+
+        assert!(prompt.starts_with("Personalidad personalizada."));
+        assert!(prompt.contains("responde siempre en español rioplatense"));
+        assert!(prompt.contains("No respondas en portugués"));
+        assert!(prompt.contains("Usuario: Olá, tudo bem?\nMondo:"));
+    }
 
     #[test]
     fn detects_spanish_open_application_commands() {
