@@ -1,4 +1,4 @@
-# Personaliza el nombre, modelo, voz y apariencia de tu asistente.
+# Personaliza el nombre, modelou+ istente.
 # Las rutas relativas se resuelven desde la carpeta de este archivo.
 assistant_name=Mondo
 ollama_url=http://192.168.0.116:11434
