@@ -116,7 +116,7 @@ curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude
 curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json -o voices/es_MX-claude-high.onnx.json
 ```
 
-En `config.txt`, deja `voice_name=` vacío, configura `piper_model=voices/es_MX-claude-high.onnx` y activa `speech_enabled=true`. Tanto el modelo como su archivo `.onnx.json` deben estar en esa ruta relativa a la carpeta de `config.txt`. En esta configuración, `piper_model=..\bmo.onnx`, así que en la Raspberry copia `bmo.onnx` y `bmo.onnx.json` al directorio padre de `config.txt`, o cambia la opción a la ubicación donde los guardaste. Para desactivar la lectura en voz alta, vuelve a poner `speech_enabled=false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
+En `config.txt`, deja `voice_name=` vacío, configura `piper_model=es_AR-daniela-high.onnx` y activa `speech_enabled=true`. Tanto el modelo como su archivo `.onnx.json` deben estar junto a `config.txt` (o ajusta la ruta relativa). La voz Daniela es de Argentina. Para desactivar la lectura en voz alta, vuelve a poner `speech_enabled=false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
 
 Instala Rust estable y compila Mondo y Whisper:
 q

@@ -1,14 +1,19 @@
 {
-    "dataset": "ko_voice_dojo",
+    "dataset": "daniela",
     "audio": {
         "sample_rate": 22050,
-        "quality": "training_folder"
+        "quality": "high"
     },
     "espeak": {
-        "voice": "en-us"
+        "voice": "es-419"
     },
     "language": {
-        "code": "en-us"
+        "code": "es_AR",
+        "family": "es",
+        "region": "AR",
+        "name_native": "Español",
+        "name_english": "Spanish",
+        "country_english": "Argentina"
     },
     "inference": {
         "noise_scale": 0.667,
