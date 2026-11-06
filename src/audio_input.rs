@@ -11,7 +11,7 @@ use tempfile::Builder;
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 const LIVE_WINDOW_SECONDS: u32 = 4;
-const PRE_ROLL_MILLISECONDS: usize = 300;
+const PRE_ROLL_MILLISECONDS: usize = 500;
 
 pub struct AudioTempFile {
     path: PathBuf,
@@ -75,7 +75,7 @@ impl AudioSnapshotSource {
         };
         let mono = downmix(&recent_samples, self.channels);
         let resampled = resample(&mono, self.sample_rate, WHISPER_SAMPLE_RATE);
-        let cleaned = clean_audio(&resampled);
+        let cleaned = prepare_audio(&resampled);
         write_wav(&cleaned)
     }
 }
@@ -220,24 +220,6 @@ impl AudioInput {
         })
     }
 
-    pub fn start(&self) -> Result<()> {
-        if self.recording.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        self.samples
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?
-            .clear();
-        self.pre_roll
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Se dañó el estado de captura de audio"))?
-            .clear();
-        self.recording.store(true, Ordering::Relaxed);
-        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
-        Ok(())
-    }
-
     pub fn start_with_pre_roll(&self) -> Result<()> {
         if self.recording.load(Ordering::Relaxed) {
             return Ok(());
@@ -285,7 +267,7 @@ impl AudioInput {
         );
         let mono = downmix(&captured, self.channels);
         let resampled = resample(&mono, self.sample_rate, WHISPER_SAMPLE_RATE);
-        let cleaned = clean_audio(&resampled);
+        let cleaned = prepare_audio(&resampled);
 
         if cleaned.is_empty() {
             bail!(
@@ -302,7 +284,7 @@ fn clean_audio(samples: &[f32]) -> Vec<f32> {
         return Vec::new();
     }
 
-    let noise_floor = 0.008f32;
+    let noise_floor = 0.003f32;
     let frame_size = 160usize;
     let mut start = 0usize;
     while start + frame_size <= samples.len() {
@@ -338,6 +320,38 @@ fn clean_audio(samples: &[f32]) -> Vec<f32> {
     let start = start.saturating_sub(padding);
     let end = end.saturating_add(padding).min(samples.len());
     samples[start..end].to_vec()
+}
+
+fn prepare_audio(samples: &[f32]) -> Vec<f32> {
+    let mut cleaned = clean_audio(samples);
+    if cleaned.is_empty() {
+        return cleaned;
+    }
+
+    let frame_size = WHISPER_SAMPLE_RATE as usize / 100;
+    let mut frame_levels = cleaned
+        .chunks(frame_size)
+        .map(|frame| {
+            (frame.iter().map(|sample| sample * sample).sum::<f32>() / frame.len() as f32).sqrt()
+        })
+        .filter(|level| *level >= 0.003)
+        .collect::<Vec<_>>();
+    if frame_levels.is_empty() {
+        return cleaned;
+    }
+    frame_levels.sort_by(f32::total_cmp);
+    let reference_level = frame_levels[frame_levels.len() * 3 / 4];
+    let peak = cleaned
+        .iter()
+        .map(|sample| sample.abs())
+        .fold(0.0f32, f32::max);
+    let gain = (0.12 / reference_level)
+        .clamp(0.25, 8.0)
+        .min(0.95 / peak.max(0.001));
+    for sample in &mut cleaned {
+        *sample = (*sample * gain).clamp(-0.95, 0.95);
+    }
+    cleaned
 }
 
 fn write_wav(samples: &[f32]) -> Result<AudioTempFile> {
@@ -426,9 +440,21 @@ fn downmix(samples: &[f32], channels: usize) -> Vec<f32> {
     if channels == 0 {
         return Vec::new();
     }
+    let mut channel_energy = vec![0.0; channels];
+    for frame in samples.chunks_exact(channels) {
+        for (energy, sample) in channel_energy.iter_mut().zip(frame) {
+            *energy += sample * sample;
+        }
+    }
+    let mut best_channel = 0;
+    for channel in 1..channels {
+        if channel_energy[channel] > channel_energy[best_channel] {
+            best_channel = channel;
+        }
+    }
     samples
         .chunks_exact(channels)
-        .map(|frame| frame.iter().sum::<f32>() / channels as f32)
+        .map(|frame| frame[best_channel])
         .collect()
 }
 
@@ -442,13 +468,54 @@ fn resample(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
 
     let output_len =
         ((samples.len() - 1) as u64 * target_rate as u64 / source_rate as u64 + 1) as usize;
+    let cutoff = (target_rate as f64 / source_rate as f64).min(1.0) * 0.94;
+    let radius = 32isize;
+    const RESAMPLE_PHASES: usize = 256;
+    let kernel = (0..RESAMPLE_PHASES)
+        .map(|phase| {
+            let fraction = phase as f64 / RESAMPLE_PHASES as f64;
+            (0..64)
+                .map(|tap| {
+                    let offset = tap as isize - radius + 1;
+                    let distance = fraction - offset as f64;
+                    let window =
+                        0.5 + 0.5 * (std::f64::consts::PI * distance / radius as f64).cos();
+                    let scaled_distance = cutoff * distance;
+                    let sinc = if scaled_distance.abs() < f64::EPSILON {
+                        1.0
+                    } else {
+                        (std::f64::consts::PI * scaled_distance).sin()
+                            / (std::f64::consts::PI * scaled_distance)
+                    };
+                    cutoff * sinc * window
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
     (0..output_len)
         .map(|index| {
             let position = index as f64 * source_rate as f64 / target_rate as f64;
-            let left = position.floor() as usize;
-            let right = (left + 1).min(samples.len() - 1);
-            let fraction = (position - left as f64) as f32;
-            samples[left] + (samples[right] - samples[left]) * fraction
+            let mut center = position.floor() as isize;
+            let mut phase = ((position - center as f64) * RESAMPLE_PHASES as f64).round() as usize;
+            if phase == RESAMPLE_PHASES {
+                center += 1;
+                phase = 0;
+            }
+            let mut weighted_sum = 0.0;
+            let mut weight_sum = 0.0;
+            for (tap, weight) in kernel[phase].iter().enumerate() {
+                let source_index = center + tap as isize - radius + 1;
+                if !(0..samples.len() as isize).contains(&source_index) {
+                    continue;
+                }
+                weighted_sum += samples[source_index as usize] as f64 * weight;
+                weight_sum += weight;
+            }
+            if weight_sum.abs() < f64::EPSILON {
+                0.0
+            } else {
+                (weighted_sum / weight_sum) as f32
+            }
         })
         .collect()
 }
@@ -457,7 +524,7 @@ fn resample(samples: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
 mod tests {
     use super::{
         AudioSnapshotSource, LIVE_WINDOW_SECONDS, WHISPER_SAMPLE_RATE, clean_audio, downmix,
-        resample, store_samples, write_wav,
+        prepare_audio, resample, store_samples, write_wav,
     };
     use std::collections::VecDeque;
     use std::sync::{
@@ -491,13 +558,40 @@ mod tests {
     }
 
     #[test]
-    fn downmix_averages_interleaved_channels() {
-        assert_eq!(downmix(&[1.0, -1.0, 0.5, 0.5], 2), vec![0.0, 0.5]);
+    fn downmix_selects_the_strongest_interleaved_channel() {
+        assert_eq!(downmix(&[1.0, -1.0, 0.5, 0.5], 2), vec![1.0, 0.5]);
     }
 
     #[test]
-    fn resample_interpolates_samples() {
-        assert_eq!(resample(&[0.0, 1.0], 1, 2), vec![0.0, 0.5, 1.0]);
+    fn downmix_avoids_cancelling_out_of_phase_channels() {
+        assert_eq!(downmix(&[0.5, -0.5, 0.25, -0.25], 2), vec![0.5, 0.25]);
+    }
+
+    #[test]
+    fn resample_preserves_dc_and_output_length() {
+        let samples = vec![0.25; 48_000];
+        let resampled = resample(&samples, 48_000, WHISPER_SAMPLE_RATE);
+
+        assert_eq!(resampled.len(), WHISPER_SAMPLE_RATE as usize);
+        assert!(
+            resampled
+                .iter()
+                .all(|sample| (*sample - 0.25).abs() < 0.001)
+        );
+    }
+
+    #[test]
+    fn resample_rejects_frequencies_above_the_target_nyquist_limit() {
+        let samples = (0..48_000)
+            .map(|index| (std::f32::consts::TAU * 12_000.0 * index as f32 / 48_000.0).sin())
+            .collect::<Vec<_>>();
+
+        let resampled = resample(&samples, 48_000, WHISPER_SAMPLE_RATE);
+        let stable = &resampled[100..resampled.len() - 100];
+        let rms =
+            (stable.iter().map(|sample| sample * sample).sum::<f32>() / stable.len() as f32).sqrt();
+
+        assert!(rms < 0.05, "out-of-band RMS was {rms}");
     }
 
     #[test]
@@ -511,6 +605,17 @@ mod tests {
         assert!(cleaned.len() < samples.len());
         assert!(cleaned.first().is_some_and(|sample| *sample == 0.0));
         assert!(cleaned.last().is_some_and(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn prepare_audio_boosts_quiet_speech_without_clipping() {
+        let mut samples = vec![0.0; WHISPER_SAMPLE_RATE as usize];
+        samples[2_000..14_000].fill(0.01);
+
+        let prepared = prepare_audio(&samples);
+
+        assert!(prepared.iter().any(|sample| *sample > 0.05));
+        assert!(prepared.iter().all(|sample| sample.abs() <= 0.95));
     }
 
     #[test]

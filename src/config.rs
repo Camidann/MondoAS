@@ -24,6 +24,7 @@ pub struct AgentConfig {
     pub whisper_beam_size: usize,
     pub whisper_server_bin: PathBuf,
     pub whisper_model: PathBuf,
+    pub piper_model: PathBuf,
     pub avatar_file: PathBuf,
     pub avatar_sequence: Vec<PathBuf>,
     pub avatar_enabled: bool,
@@ -162,6 +163,7 @@ impl AgentConfig {
         );
         config.whisper_model =
             resolve_whisper_path(&config_dir, &config.whisper_model.to_string_lossy(), false);
+        config.piper_model = resolve_path(&config_dir, &config.piper_model.to_string_lossy());
 
         for (line_index, raw_line) in contents.lines().enumerate() {
             let line = raw_line.trim();
@@ -215,6 +217,7 @@ impl AgentConfig {
                 "whisper_model" => {
                     config.whisper_model = resolve_whisper_path(&config_dir, value, false)
                 }
+                "piper_model" => config.piper_model = resolve_path(&config_dir, value),
                 "avatar_file" => config.avatar_file = resolve_path(&config_dir, value),
                 "avatar_sequence" => {
                     config.avatar_sequence = if value.is_empty() {
@@ -307,6 +310,7 @@ impl AgentConfig {
             whisper_beam_size: default_whisper_beam_size(),
             whisper_server_bin: default_whisper_server_path(),
             whisper_model: PathBuf::from("whisper").join(default_whisper_model_filename()),
+            piper_model: PathBuf::from("voices").join("es_MX-claude-high.onnx"),
             avatar_file: PathBuf::from("avatar.png"),
             avatar_sequence: Vec::new(),
             avatar_enabled: true,
@@ -338,6 +342,7 @@ impl AgentConfig {
          whisper_beam_size={}\n\
          whisper_server_bin={}\n\
          whisper_model=whisper\\{}\n\
+         piper_model=voices\\es_MX-claude-high.onnx\n\
          avatar_file=avatar.png\n\
          avatar_sequence=\n\
          avatar_enabled=true\n\
@@ -655,6 +660,23 @@ mod tests {
         assert_eq!(config.whisper_prompt, "Spotify, Discord");
         assert_eq!(config.whisper_threads, 8);
         assert_eq!(config.whisper_beam_size, 3);
+    }
+
+    #[test]
+    fn resolves_configured_piper_voice_path() {
+        let config = AgentConfig::parse(
+            "piper_model=voices\\es_MX-claude-high.onnx\n",
+            PathBuf::from("portable"),
+            PathBuf::from("portable\\config.txt"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.piper_model,
+            PathBuf::from("portable")
+                .join("voices")
+                .join("es_MX-claude-high.onnx")
+        );
     }
 
     #[test]

@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, bail};
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(target_os = "linux")]
+use std::{path::Path, process::Stdio};
 use tokio::process::Command;
 
-pub async fn speak(text: &str, voice_name: &str) -> Result<()> {
+pub async fn speak(text: &str, voice_name: &str, piper_model: &std::path::Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
+        let _ = piper_model;
         let encoded_text = STANDARD.encode(text.as_bytes());
         let encoded_voice = STANDARD.encode(voice_name.as_bytes());
         let script = format!(
@@ -43,19 +46,16 @@ pub async fn speak(text: &str, voice_name: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let selected_voice = voice_name.trim();
+        if selected_voice.is_empty() {
+            return speak_with_piper(text, piper_model).await;
+        }
         let mut command = Command::new("bash");
         let mut args = vec!["-lc".to_string()];
-        let mut script = if selected_voice.is_empty() {
-            String::from(
-                "if command -v espeak-ng >/dev/null 2>&1; then espeak-ng -s 165 \"$TEXT\"; elif command -v espeak >/dev/null 2>&1; then espeak -s 165 \"$TEXT\"; else echo 'No hay un sintetizador de voz instalado. Instala espeak-ng o espeak.' >&2; exit 127; fi",
-            )
-        } else {
-            format!(
-                "if command -v espeak-ng >/dev/null 2>&1; then espeak-ng -s 165 -v {} \"$TEXT\"; elif command -v espeak >/dev/null 2>&1; then espeak -s 165 -v {} \"$TEXT\"; else echo 'No hay un sintetizador de voz instalado. Instala espeak-ng o espeak.' >&2; exit 127; fi",
-                escape_for_shell(selected_voice),
-                escape_for_shell(selected_voice)
-            )
-        };
+        let mut script = format!(
+            "if command -v espeak-ng >/dev/null 2>&1; then espeak-ng -s 165 -v {} \"$TEXT\"; elif command -v espeak >/dev/null 2>&1; then espeak -s 165 -v {} \"$TEXT\"; else echo 'No hay un sintetizador de voz instalado. Instala espeak-ng o espeak.' >&2; exit 127; fi",
+            escape_for_shell(selected_voice),
+            escape_for_shell(selected_voice)
+        );
         script = script.replace("$TEXT", &escape_for_shell(text));
         args.push(script);
         let output = command
@@ -74,6 +74,7 @@ pub async fn speak(text: &str, voice_name: &str) -> Result<()> {
 
     #[cfg(target_os = "macos")]
     {
+        let _ = piper_model;
         let selected_voice = voice_name.trim();
         let mut command = Command::new("say");
         if !selected_voice.is_empty() {
@@ -97,8 +98,72 @@ pub async fn speak(text: &str, voice_name: &str) -> Result<()> {
     {
         let _ = text;
         let _ = voice_name;
+        let _ = piper_model;
         bail!("La respuesta por voz no está implementada para este sistema operativo");
     }
+}
+
+#[cfg(target_os = "linux")]
+async fn speak_with_piper(text: &str, model: &Path) -> Result<()> {
+    let mut model_config = model.as_os_str().to_os_string();
+    model_config.push(".json");
+    let model_config = std::path::PathBuf::from(model_config);
+    if !model.is_file() || !model_config.is_file() {
+        bail!(
+            "No se encontró la voz de Piper en {} (o falta su archivo .json). Instala la voz en esa ruta o configura piper_model.",
+            model.display()
+        );
+    }
+
+    let output_file = tempfile::Builder::new()
+        .suffix(".wav")
+        .tempfile()
+        .context("No se pudo crear el archivo temporal de Piper")?;
+    let mut child = Command::new("piper")
+        .args(["--model"])
+        .arg(model)
+        .args(["--output_file"])
+        .arg(output_file.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .context("No se pudo iniciar Piper. Instala el ejecutable piper y asegúrate de que esté en PATH.")?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .context("No se pudo enviar el texto a Piper")?;
+    let text_with_newline = format!("{text}\n");
+    tokio::io::AsyncWriteExt::write_all(&mut stdin, text_with_newline.as_bytes())
+        .await
+        .context("No se pudo enviar el texto a Piper")?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .await
+        .context("No se pudo esperar la síntesis de Piper")?;
+    if !output.status.success() {
+        bail!(
+            "Piper no pudo sintetizar la respuesta: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    let playback = Command::new("aplay")
+        .arg("-q")
+        .arg(output_file.path())
+        .output()
+        .await
+        .context("No se pudo iniciar aplay. Instala alsa-utils para reproducir la voz de Piper.")?;
+    if !playback.status.success() {
+        bail!(
+            "No se pudo reproducir la voz de Piper: {}",
+            String::from_utf8_lossy(&playback.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]

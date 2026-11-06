@@ -43,8 +43,8 @@ enum FaceState {
     Warmup,
 }
 
-const VOICE_ACTIVITY_THRESHOLD: f32 = 0.015;
-const VOICE_START_CONFIRMATION: Duration = Duration::from_millis(150);
+const VOICE_ACTIVITY_THRESHOLD: f32 = 0.006;
+const VOICE_START_CONFIRMATION: Duration = Duration::from_millis(200);
 const VOICE_END_SILENCE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -665,6 +665,7 @@ impl DesktopApp {
         let agent = self.agent.clone();
         let tx = self.event_tx.clone();
         let voice = self.config.voice_name.clone();
+        let piper_model = self.config.piper_model.clone();
         let speech_enabled = self.config.speech_enabled;
         let assistant_name = self.config.assistant_name.clone();
         let speaking = Arc::clone(&self.speaking);
@@ -682,7 +683,7 @@ impl DesktopApp {
                         let _ = tx.send(AppEvent::Status(format!(
                             "{assistant_name} está hablando..."
                         )));
-                        match speak(&reply, &voice).await {
+                        match speak(&reply, &voice, &piper_model).await {
                             Ok(()) => {
                                 let _ = tx.send(AppEvent::Status("Listo".to_string()));
                             }
@@ -735,11 +736,7 @@ impl DesktopApp {
             self.status = "No se pudo iniciar el micrófono".to_string();
             return;
         };
-        let start_result = if automatic {
-            audio.start_with_pre_roll()
-        } else {
-            audio.start()
-        };
+        let start_result = audio.start_with_pre_roll();
         match start_result {
             Ok(()) => {
                 self.recording = true;
@@ -788,6 +785,7 @@ impl DesktopApp {
                 let agent = self.agent.clone();
                 let tx = self.event_tx.clone();
                 let voice = self.config.voice_name.clone();
+                let piper_model = self.config.piper_model.clone();
                 let speech_enabled = self.config.speech_enabled;
                 let assistant_name = self.config.assistant_name.clone();
                 let speaking = Arc::clone(&self.speaking);
@@ -815,7 +813,7 @@ impl DesktopApp {
                                         let _ = tx.send(AppEvent::Status(format!(
                                             "{assistant_name} está hablando..."
                                         )));
-                                        match speak(&reply, &voice).await {
+                                        match speak(&reply, &voice, &piper_model).await {
                                             Ok(()) => {
                                                 let _ =
                                                     tx.send(AppEvent::Status("Listo".to_string()));
@@ -1481,7 +1479,7 @@ mod automatic_speech_tests {
         );
         assert_eq!(
             detector.update(
-                start + Duration::from_millis(149),
+                start + Duration::from_millis(199),
                 VOICE_ACTIVITY_THRESHOLD,
                 false
             ),
@@ -1489,7 +1487,7 @@ mod automatic_speech_tests {
         );
         assert_eq!(
             detector.update(
-                start + Duration::from_millis(150),
+                start + Duration::from_millis(200),
                 VOICE_ACTIVITY_THRESHOLD,
                 false
             ),

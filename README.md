@@ -61,7 +61,7 @@ Estas son las opciones principales:
 | `input_device` | Micrófono que se usa. Déjalo vacío para elegir el predeterminado. |
 | `push_to_talk_hotkey` | Atajo para empezar y terminar de hablar. |
 | `avatar_toggle_hotkey` | Atajo para mostrar u ocultar la cara. |
-| `whisper_language` | Idioma del reconocimiento de voz. Usa `auto` para detectarlo. |
+| `whisper_language` | Idioma del reconocimiento de voz. Para hablar en español, usa `es` en lugar de `auto` para evitar que Whisper confunda el idioma. |
 | `whisper_prompt` | Palabras que ayudan a reconocer nombres y expresiones. |
 | `whisper_threads` | Hilos de CPU para el reconocimiento, de 1 a 16. |
 | `whisper_beam_size` | Esfuerzo de búsqueda, de 1 a 5. Un número mayor puede tardar más. |
@@ -71,7 +71,8 @@ Estas son las opciones principales:
 | `avatar_sequence` | Lista de imágenes separadas por `\|`. |
 | `avatar_enabled` | Indica si la cara aparece al iniciar. |
 | `avatar_size` y `avatar_height` | Ancho y alto de la cara. El ancho puede ser de 64 a 512; el alto, de 64 a 768. |
-| `voice_name` | Nombre exacto de una voz instalada. En Windows puedes verlas con `Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() \| ForEach-Object { $_.VoiceInfo.Name }`. Déjalo vacío para usar la voz predeterminada. Esto selecciona una voz del sistema; no crea ni clona voces. |
+| `voice_name` | Voz del sistema en Windows/macOS. En Linux, déjalo vacío para usar Piper; un nombre configurado selecciona una voz de eSpeak. En Windows puedes ver voces instaladas con `Add-Type -AssemblyName System.Speech; (New-Object System.Speech.Synthesis.SpeechSynthesizer).GetInstalledVoices() \| ForEach-Object { $_.VoiceInfo.Name }`. |
+| `piper_model` | Ruta al modelo de voz Piper en Linux. El archivo `.onnx.json` correspondiente debe estar junto al modelo. |
 | `speech_enabled` | Activa o desactiva la respuesta hablada; `false` deja las respuestas solo en texto. |
 
 Los atajos deben ser distintos. Puedes escribir combinaciones como `CTRL+F9` o `ALT+SHIFT+M`. Si el sistema no permite registrar un atajo global, usa el botón de la ventana.
@@ -84,7 +85,7 @@ La primera vez, el sistema puede pedir permiso para usar el micrófono. La escuc
 
 En Windows, habilita el acceso al micrófono para aplicaciones de escritorio en **Configuración > Privacidad y seguridad > Micrófono**. En Linux, revisa los permisos de ALSA o PipeWire.
 
-En escucha automática, Mondo conserva solo unos 300 ms de audio reciente en memoria para no cortar el comienzo de las palabras. Al detectar dos segundos de silencio, transcribe el turno completo con Whisper. Los WAV temporales se eliminan al terminar; no se guarda una grabación permanente.
+En escucha automática, Mondo conserva 500 ms de audio reciente en memoria para no cortar el comienzo de las palabras. Selecciona el canal del micrófono con mejor nivel, convierte el audio a 16 kHz con un filtro antialias y ajusta la ganancia de la voz sin permitir saturación. Al detectar dos segundos de silencio, transcribe el turno completo con Whisper. Los WAV temporales se eliminan al terminar; no se guarda una grabación permanente. Si Whisper reconoce otro idioma, revisa que `whisper_language=es` en `config.txt`.
 
 ## Linux y Raspberry Pi
 
@@ -94,10 +95,28 @@ En Debian, Ubuntu o Raspberry Pi OS, instala las dependencias:
 
 ```bash
 sudo apt update
-sudo apt install build-essential cmake pkg-config libasound2-dev libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libudev-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
+sudo apt install build-essential cmake pkg-config libasound2-dev alsa-utils libgl1-mesa-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-0 libwayland-dev libudev-dev espeak-ng xdg-desktop-portal xdg-desktop-portal-gtk
 ```
 
 Para cerrar aplicaciones por voz en X11, instala también `wmctrl`. Esa función no está disponible en Wayland. Algunos escritorios Wayland tampoco permiten atajos globales; en ese caso, usa el botón **Hablar**.
+
+Para una voz hablada más natural que eSpeak, instala Piper compatible con la arquitectura de la Raspberry y deja el ejecutable `piper` en `PATH`. En Raspberry Pi OS de 64 bits, puedes instalarlo con `pipx` para mantener sus dependencias aisladas:
+
+```bash
+sudo apt install pipx
+pipx install piper-tts
+pipx ensurepath
+```
+
+En Raspberry Pi OS de 32 bits, usa el paquete `armv7` de la [guía oficial](https://github.com/OHF-Voice/piper1-gpl/blob/main/docs/CLI.md#binary-releases). Comprueba que `command -v piper` encuentre el ejecutable desde la misma sesión de escritorio que inicia Mondo. Después, descarga una voz en español junto a su archivo de configuración:
+
+```bash
+mkdir -p voices
+curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx -o voices/es_MX-claude-high.onnx
+curl -L https://huggingface.co/rhasspy/piper-voices/resolve/main/es/es_MX/claude/high/es_MX-claude-high.onnx.json -o voices/es_MX-claude-high.onnx.json
+```
+
+En `config.txt`, deja `voice_name=` vacío, configura `piper_model=voices/es_MX-claude-high.onnx` y activa `speech_enabled=true`. Para desactivar la lectura en voz alta, vuelve a ponerlo en `false`. Piper y la voz se ejecutan localmente; no se envía el texto a un servicio de voz. Consulta también la [guía oficial de instalación de Piper](https://github.com/OHF-Voice/piper1-gpl).
 
 Instala Rust estable y compila Mondo y Whisper:
 q
