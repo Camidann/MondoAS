@@ -384,6 +384,167 @@ pub struct DesktopApp {
     hotkey_registration_error: Option<String>,
 }
 
+#[derive(Default)]
+struct ChatActions {
+    prompt_to_send: Option<String>,
+    toggle_recording: bool,
+    toggle_auto_listening: bool,
+}
+
+fn show_chat(app: &mut DesktopApp, ui: &mut egui::Ui, ctx: &egui::Context) -> ChatActions {
+    let mut actions = ChatActions::default();
+    let mut focus_requested = app.focus_input;
+
+    ui.horizontal(|ui| {
+        ui.heading(format!("Chat con {}", app.config.assistant_name));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Volver").clicked() {
+                app.chat_visible = false;
+            }
+        });
+    });
+    ui.separator();
+
+    if app.recording || !app.live_transcript.is_empty() {
+        ui.strong(if app.recording {
+            "Transcripción en vivo:"
+        } else {
+            "Último fragmento reconocido:"
+        });
+        ui.label(if app.live_transcript.is_empty() {
+            "Habla; el texto aparecerá aquí mientras Mondo escucha."
+        } else {
+            &app.live_transcript
+        });
+    }
+
+    egui::ScrollArea::vertical()
+        .auto_shrink([false; 2])
+        .stick_to_bottom(true)
+        .show(ui, |ui| {
+            for (speaker, text) in &app.messages {
+                ui.strong(format!("{speaker}:"));
+                ui.label(text);
+                ui.add_space(8.0);
+            }
+        });
+
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!app.request_running, |ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut app.input)
+                    .hint_text("Escribe un mensaje...")
+                    .desired_width(f32::INFINITY),
+            );
+            if focus_requested {
+                response.request_focus();
+                focus_requested = false;
+            }
+            if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                actions.prompt_to_send = Some(std::mem::take(&mut app.input));
+            }
+        });
+        if ui
+            .add_enabled(!app.request_running, egui::Button::new("Enviar"))
+            .clicked()
+        {
+            actions.prompt_to_send = Some(std::mem::take(&mut app.input));
+        }
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(
+                !app.request_running,
+                egui::Button::new(if app.recording {
+                    "Enviar voz"
+                } else {
+                    "Hablar"
+                }),
+            )
+            .clicked()
+        {
+            actions.toggle_recording = true;
+        }
+        if ui
+            .add_enabled(
+                !app.recording && !app.request_running,
+                egui::Button::new(if app.auto_listening {
+                    "Pausar escucha automática"
+                } else {
+                    "Reanudar escucha"
+                }),
+            )
+            .clicked()
+        {
+            actions.toggle_auto_listening = true;
+        }
+        if ui.button("Recargar caras").clicked() {
+            app.reload_avatar(ctx);
+        }
+        ui.label(format!("Modelo: {}", app.config.model));
+    });
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Micrófono:");
+        ui.add_enabled_ui(!app.recording, |ui| {
+            egui::ComboBox::from_id_salt("input-device")
+                .selected_text(if app.selected_input_device.is_empty() {
+                    default_input_device_label()
+                } else {
+                    app.selected_input_device.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut app.selected_input_device,
+                        String::new(),
+                        default_input_device_label(),
+                    );
+                    for device in &app.input_devices {
+                        ui.selectable_value(&mut app.selected_input_device, device.clone(), device);
+                    }
+                });
+        });
+        if ui.button("Actualizar lista").clicked() {
+            match input_device_names() {
+                Ok(devices) => {
+                    app.input_devices = devices;
+                    app.audio_error = None;
+                }
+                Err(err) => app.audio_error = Some(format!("{err:#}")),
+            }
+        }
+    });
+
+    if (app.recording || app.auto_listening)
+        && let Some(audio) = &app.audio
+    {
+        ui.add(
+            egui::ProgressBar::new(audio.input_level()).text(if app.recording {
+                "Nivel del micrófono"
+            } else {
+                "Nivel · habla para activar"
+            }),
+        );
+    }
+    if let Some(error) = &app.audio_error {
+        ui.colored_label(egui::Color32::LIGHT_RED, format!("Micrófono: {error}"));
+    }
+    if let Some(error) = &app.hotkey_registration_error {
+        ui.colored_label(
+            egui::Color32::LIGHT_RED,
+            format!("Atajos globales: {error}"),
+        );
+    }
+    ui.label(format!(
+        "Atajo de voz: {} · Esc cierra este panel",
+        app.config.push_to_talk_hotkey
+    ));
+
+    app.focus_input = focus_requested;
+    actions
+}
+
 impl DesktopApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -489,7 +650,7 @@ impl DesktopApp {
         let auto_listening = false;
         let agent = Agent::new(config.clone())?;
 
-        Ok(Self {
+        let mut app = Self {
             avatar_visible: config.avatar_enabled,
             agent,
             transcriber: WhisperTranscriber::new(config.clone()),
@@ -525,7 +686,18 @@ impl DesktopApp {
             push_to_talk_registered,
             avatar_toggle_registered,
             hotkey_registration_error: hotkey_error,
-        })
+        };
+        let agent = app.agent.clone();
+        let event_tx = app.event_tx.clone();
+        app.status = "Cargando el modelo para responder más rápido...".to_string();
+        app.runtime.spawn(async move {
+            let status = match agent.warm_up().await {
+                Ok(()) => "Modelo listo.".to_string(),
+                Err(err) => format!("No se pudo precargar el modelo: {err:#}"),
+            };
+            let _ = event_tx.send(AppEvent::Status(status));
+        });
+        Ok(app)
     }
 
     fn poll_events(&mut self) {
@@ -1156,6 +1328,11 @@ impl eframe::App for DesktopApp {
                             }
                         }
                     });
+                } else if self.chat_visible {
+                    let actions = show_chat(self, ui, ctx);
+                    prompt_to_send = actions.prompt_to_send;
+                    toggle_recording = actions.toggle_recording;
+                    toggle_auto_listening = actions.toggle_auto_listening;
                 } else {
                     ui.horizontal(|ui| {
                         ui.heading(&self.config.assistant_name);
@@ -1268,179 +1445,6 @@ impl eframe::App for DesktopApp {
                     });
                 }
             });
-
-        if self.chat_visible && !self.fullscreen {
-            let mut open = true;
-            let mut focus_requested = self.focus_input;
-            let screen_size = ctx.input(|input| input.screen_rect().size());
-            let max_chat_size = egui::vec2(
-                (screen_size.x - 24.0).max(220.0),
-                (screen_size.y - 24.0).max(180.0),
-            );
-            let default_chat_size = egui::vec2(
-                520.0_f32.min(max_chat_size.x),
-                360.0_f32.min(max_chat_size.y),
-            );
-            let min_chat_size = egui::vec2(
-                280.0_f32.min(max_chat_size.x),
-                180.0_f32.min(max_chat_size.y),
-            );
-            egui::Window::new(format!("Chat con {}", self.config.assistant_name))
-                .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .default_size(default_chat_size)
-                .min_size(min_chat_size)
-                .max_size(max_chat_size)
-                .frame(
-                    egui::Frame::new()
-                        .fill(egui::Color32::from_rgb(12, 12, 12))
-                        .stroke(egui::Stroke::new(
-                            1.0_f32,
-                            egui::Color32::from_rgb(70, 70, 70),
-                        )),
-                )
-                .show(ctx, |ui| {
-                    if self.recording || !self.live_transcript.is_empty() {
-                        ui.strong(if self.recording {
-                            "Transcripción en vivo:"
-                        } else {
-                            "Último fragmento reconocido:"
-                        });
-                        ui.label(if self.live_transcript.is_empty() {
-                            "Habla; el texto aparecerá aquí mientras Mondo escucha."
-                        } else {
-                            &self.live_transcript
-                        });
-                    }
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false; 2])
-                        .stick_to_bottom(true)
-                        .max_height((ui.available_height() - 125.0).max(60.0))
-                        .show(ui, |ui| {
-                            for (speaker, text) in &self.messages {
-                                ui.strong(format!("{speaker}:"));
-                                ui.label(text);
-                                ui.add_space(8.0);
-                            }
-                        });
-                    ui.horizontal(|ui| {
-                        ui.add_enabled_ui(!self.request_running, |ui| {
-                            let response = ui.add(
-                                egui::TextEdit::singleline(&mut self.input)
-                                    .hint_text("Escribe un mensaje...")
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if focus_requested {
-                                response.request_focus();
-                                focus_requested = false;
-                            }
-                            if response.has_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            {
-                                prompt_to_send = Some(std::mem::take(&mut self.input));
-                            }
-                        });
-                        if ui
-                            .add_enabled(!self.request_running, egui::Button::new("Enviar"))
-                            .clicked()
-                        {
-                            prompt_to_send = Some(std::mem::take(&mut self.input));
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !self.request_running,
-                                egui::Button::new(if self.recording {
-                                    "Enviar voz"
-                                } else {
-                                    "Hablar"
-                                }),
-                            )
-                            .clicked()
-                        {
-                            toggle_recording = true;
-                        }
-                        if ui
-                            .add_enabled(
-                                !self.recording && !self.request_running,
-                                egui::Button::new(if self.auto_listening {
-                                    "Pausar escucha automática"
-                                } else {
-                                    "Reanudar escucha"
-                                }),
-                            )
-                            .clicked()
-                        {
-                            toggle_auto_listening = true;
-                        }
-                        if ui.button("Recargar caras").clicked() {
-                            self.reload_avatar(ctx);
-                        }
-                        ui.label(format!("Modelo: {}", self.config.model));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("Micrófono:");
-                        ui.add_enabled_ui(!self.recording, |ui| {
-                            egui::ComboBox::from_id_salt("input-device")
-                                .selected_text(if self.selected_input_device.is_empty() {
-                                    default_input_device_label()
-                                } else {
-                                    self.selected_input_device.as_str()
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.selected_input_device,
-                                        String::new(),
-                                        default_input_device_label(),
-                                    );
-                                    for device in &self.input_devices {
-                                        ui.selectable_value(
-                                            &mut self.selected_input_device,
-                                            device.clone(),
-                                            device,
-                                        );
-                                    }
-                                });
-                        });
-                        if ui.button("Actualizar lista").clicked() {
-                            match input_device_names() {
-                                Ok(devices) => {
-                                    self.input_devices = devices;
-                                    self.audio_error = None;
-                                }
-                                Err(err) => self.audio_error = Some(format!("{err:#}")),
-                            }
-                        }
-                    });
-                    if (self.recording || self.auto_listening)
-                        && let Some(audio) = &self.audio
-                    {
-                        ui.add(egui::ProgressBar::new(audio.input_level()).text(
-                            if self.recording {
-                                "Nivel del micrófono"
-                            } else {
-                                "Nivel · habla para activar"
-                            },
-                        ));
-                    }
-                    if let Some(error) = &self.audio_error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, format!("Micrófono: {error}"));
-                    }
-                    if let Some(error) = &self.hotkey_registration_error {
-                        ui.colored_label(
-                            egui::Color32::LIGHT_RED,
-                            format!("Atajos globales: {error}"),
-                        );
-                    }
-                    ui.label(format!(
-                        "Atajo de voz: {} · Esc cierra este panel",
-                        self.config.push_to_talk_hotkey
-                    ));
-                });
-            self.chat_visible = open;
-            self.focus_input = focus_requested;
-        }
 
         if toggle_recording {
             self.toggle_recording();

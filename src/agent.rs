@@ -60,6 +60,42 @@ impl Agent {
         Ok(Self { client, config })
     }
 
+    pub async fn warm_up(&self) -> Result<()> {
+        let url = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(&url)
+            .json(&ChatRequest {
+                model: self.config.model.clone(),
+                messages: build_messages(&self.config.system_prompt, "Respondé solo: listo."),
+                stream: false,
+                keep_alive: "30m",
+                options: GenerateOptions {
+                    temperature: self.config.temperature,
+                    num_ctx: self.config.context_size,
+                    num_predict: 1,
+                },
+            })
+            .send()
+            .await
+            .with_context(|| format!("No se pudo conectar con Ollama en {url}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "No se pudo leer la respuesta".to_string());
+            anyhow::bail!("Error de Ollama ({}): {}", status, body);
+        }
+
+        response
+            .json::<ChatResponse>()
+            .await
+            .context("No se pudo leer la respuesta de calentamiento de Ollama")?;
+        Ok(())
+    }
+
     pub async fn respond_streaming(
         &self,
         prompt: &str,
@@ -90,7 +126,7 @@ impl Agent {
                 options: GenerateOptions {
                     temperature: self.config.temperature,
                     num_ctx: self.config.context_size,
-                    num_predict: 256,
+                    num_predict: 128,
                 },
             })
             .send()
@@ -135,7 +171,10 @@ fn build_messages(system_prompt: &str, user_prompt: &str) -> Vec<ChatMessage> {
                 "{system_prompt}\n\n\
                  Regla prioritaria de idioma: respondé siempre y exclusivamente en español \
                  rioplatense. No uses portugués, aunque el usuario escriba o hable en \
-                 portugués. Si no entendés el mensaje, pedí una aclaración en español."
+                 portugués. Si no entendés el mensaje, pedí una aclaración en español.\n\n\
+                 Priorizá coherencia, exactitud y claridad. Contestá directo y breve, en \
+                 una a tres frases salvo que te pidan más detalle. No inventes datos ni \
+                 uses humor absurdo si confunde la respuesta."
             ),
         },
         ChatMessage {
@@ -845,6 +884,12 @@ mod tests {
         assert!(messages[0].content.starts_with("Personalidad personalizada."));
         assert!(messages[0].content.contains("siempre y exclusivamente en español rioplatense"));
         assert!(messages[0].content.contains("No uses portugués"));
+        assert!(
+            messages[0]
+                .content
+                .contains("Priorizá coherencia, exactitud y claridad.")
+        );
+        assert!(messages[0].content.contains("No inventes datos"));
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content, "Olá, tudo bem?");
     }
