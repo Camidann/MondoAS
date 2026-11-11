@@ -152,6 +152,28 @@ impl AgentConfig {
             .with_context(|| format!("No se pudo guardar {}", self.config_path.display()))
     }
 
+    pub fn save_ollama_url(&self, ollama_url: &str) -> Result<()> {
+        let contents = fs::read_to_string(&self.config_path)
+            .with_context(|| format!("No se pudo leer {}", self.config_path.display()))?;
+        let mut found = false;
+        let mut updated_lines = Vec::new();
+        for line in contents.lines() {
+            if line.split_once('=').map(|(key, _)| key.trim()) == Some("ollama_url") {
+                if !found {
+                    updated_lines.push(format!("ollama_url={ollama_url}"));
+                    found = true;
+                }
+            } else {
+                updated_lines.push(line.to_string());
+            }
+        }
+        if !found {
+            updated_lines.push(format!("ollama_url={ollama_url}"));
+        }
+        fs::write(&self.config_path, updated_lines.join("\n") + "\n")
+            .with_context(|| format!("No se pudo guardar {}", self.config_path.display()))
+    }
+
     fn parse(contents: &str, config_dir: PathBuf, config_path: PathBuf) -> Result<Self> {
         let mut config = Self::defaults();
         config.config_path = config_path;
@@ -618,6 +640,25 @@ mod tests {
         assert!(contents.contains("avatar_size=180"));
         assert!(contents.contains("avatar_height=260"));
         assert_eq!(contents.matches("avatar_size=").count(), 1);
+    }
+
+    #[test]
+    fn saves_discovered_ollama_url_without_changing_other_settings() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.txt");
+        let initial = "assistant_name=Mondo\nollama_url=http://old:11434\nmodel=qwen2.5:3b\nollama_url=http://duplicate:11434\n";
+        std::fs::write(&config_path, initial).unwrap();
+        let config =
+            AgentConfig::parse(initial, directory.path().to_path_buf(), config_path.clone())
+                .unwrap();
+
+        config.save_ollama_url("http://192.168.1.20:11434").unwrap();
+
+        let contents = std::fs::read_to_string(config_path).unwrap();
+        assert_eq!(contents.matches("ollama_url=").count(), 1);
+        assert!(contents.contains("ollama_url=http://192.168.1.20:11434"));
+        assert!(contents.contains("assistant_name=Mondo"));
+        assert!(contents.contains("model=qwen2.5:3b"));
     }
 
     #[test]

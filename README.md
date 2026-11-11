@@ -42,7 +42,7 @@ La voz y el reconocimiento se procesan localmente. Ollama debe estar abierto; pu
 
 ### Ollama en otra computadora de la red
 
-Si Mondo corre en una Raspberry Pi y Ollama en una PC con Windows, configura Ollama en Windows para escuchar en la red local. En PowerShell ejecuta `setx OLLAMA_HOST "0.0.0.0:11434"` y reinicia Ollama desde el icono de la bandeja. Permite el puerto en el firewall solo para redes privadas. En el `config.txt` de la Raspberry, `ollama_url` debe usar la IPv4 de esa PC; este clon está configurado con `192.168.1.17`, que puedes cambiar si la dirección de la PC cambia. Reserva esa IP en el router para que no varíe. Desde la Pi, comprueba la conexión con `curl http://192.168.1.17:11434/api/tags`.
+Si Mondo y Ollama están en equipos distintos, configura Ollama para aceptar conexiones de la red local. En Windows, ejecuta `setx OLLAMA_HOST "0.0.0.0:11434"` en PowerShell y reinicia Ollama. Permite el puerto 11434 en el firewall solo para redes privadas. Cuando Mondo no pueda conectarse a la dirección guardada, busca Ollama en la red local, comprueba que tenga el modelo configurado y actualiza `ollama_url` en `config.txt` con la IP encontrada. La búsqueda funciona en redes IPv4 privadas con subredes de hasta 512 direcciones; ambos equipos tienen que estar en la misma red y el firewall debe permitir la conexión.
 
 ## Configuración
 

@@ -691,7 +691,13 @@ impl DesktopApp {
         let event_tx = app.event_tx.clone();
         app.status = "Cargando el modelo para responder más rápido...".to_string();
         app.runtime.spawn(async move {
-            let status = match agent.warm_up().await {
+            let status_tx = event_tx.clone();
+            let status = match agent
+                .warm_up(|status| {
+                    let _ = status_tx.send(AppEvent::Status(status.to_string()));
+                })
+                .await
+            {
                 Ok(()) => "Modelo listo.".to_string(),
                 Err(err) => format!("No se pudo precargar el modelo: {err:#}"),
             };
@@ -887,9 +893,15 @@ impl DesktopApp {
         let speaking = Arc::clone(&self.speaking);
         self.runtime.spawn(async move {
             match agent
-                .respond_streaming(&prompt, |chunk| {
-                    let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
-                })
+                .respond_streaming(
+                    &prompt,
+                    |chunk| {
+                        let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
+                    },
+                    |status| {
+                        let _ = tx.send(AppEvent::Status(status.to_string()));
+                    },
+                )
                 .await
             {
                 Ok(reply) => {
@@ -1017,9 +1029,15 @@ impl DesktopApp {
                             let _ = tx.send(AppEvent::UserTranscript(transcript.clone()));
                             let _ = tx.send(AppEvent::Status("Pensando...".to_string()));
                             match agent
-                                .respond_streaming(&transcript, |chunk| {
-                                    let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
-                                })
+                                .respond_streaming(
+                                    &transcript,
+                                    |chunk| {
+                                        let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
+                                    },
+                                    |status| {
+                                        let _ = tx.send(AppEvent::Status(status.to_string()));
+                                    },
+                                )
                                 .await
                             {
                                 Ok(reply) => {
@@ -1425,7 +1443,24 @@ impl eframe::App for DesktopApp {
                             );
                         }
                         ui.add_space(10.0);
-                        ui.label(egui::RichText::new(&self.status).color(egui::Color32::GRAY));
+                        let status_color = if self.status.contains("Buscando Ollama") {
+                            egui::Color32::YELLOW
+                        } else if self.status.contains("Ollama encontrada")
+                            || self.status.contains("Conexión con Ollama actualizada")
+                        {
+                            egui::Color32::LIGHT_GREEN
+                        } else if self.status.contains("No se encontró Ollama")
+                            || self.status.contains("No se pudo")
+                        {
+                            egui::Color32::LIGHT_RED
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        ui.label(
+                            egui::RichText::new(&self.status)
+                                .color(status_color)
+                                .strong(),
+                        );
                     });
 
                     ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {

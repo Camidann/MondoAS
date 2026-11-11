@@ -1,13 +1,18 @@
 use std::{
     collections::HashSet,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
+use if_addrs::{IfAddr, get_if_addrs};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 #[cfg(any(windows, target_os = "linux"))]
 use std::{env, process::Command};
+use tokio::{sync::RwLock, task::JoinSet};
 
 use crate::config::AgentConfig;
 
@@ -45,10 +50,22 @@ struct ChatResponseMessage {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OllamaTags {
+    #[serde(default)]
+    models: Vec<OllamaModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaModel {
+    name: String,
+}
+
 #[derive(Clone)]
 pub struct Agent {
     client: Client,
     config: AgentConfig,
+    ollama_url: Arc<RwLock<String>>,
 }
 
 impl Agent {
@@ -57,11 +74,38 @@ impl Agent {
             .no_proxy()
             .build()
             .context("No se pudo configurar la conexión directa con Ollama")?;
-        Ok(Self { client, config })
+        let ollama_url = Arc::new(RwLock::new(config.ollama_url.clone()));
+        Ok(Self {
+            client,
+            config,
+            ollama_url,
+        })
     }
 
-    pub async fn warm_up(&self) -> Result<()> {
-        let url = format!("{}/api/chat", self.config.ollama_url.trim_end_matches('/'));
+    pub async fn warm_up(&self, mut on_status: impl FnMut(&str) + Send) -> Result<()> {
+        let configured_url = self.ollama_url.read().await.clone();
+        if let Err(connection_error) = self.warm_up_at(&configured_url).await {
+            let discovered_url =
+                discover_ollama_url(&self.client, &self.config.model, &mut on_status)
+                    .await
+                    .context("No se pudo buscar Ollama en la red local")?;
+            let Some(discovered_url) = discovered_url else {
+                return Err(connection_error)
+                    .context("No se encontró Ollama con el modelo configurado en la red local");
+            };
+            self.warm_up_at(&discovered_url)
+                .await
+                .with_context(|| format!("No se pudo iniciar Ollama en {discovered_url}"))?;
+            self.save_ollama_url(&discovered_url).await?;
+            on_status(&format!(
+                "Conexión con Ollama actualizada: {discovered_url}"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn warm_up_at(&self, ollama_url: &str) -> Result<()> {
+        let url = format!("{}/api/chat", ollama_url.trim_end_matches('/'));
         let response = self
             .client
             .post(&url)
@@ -96,10 +140,17 @@ impl Agent {
         Ok(())
     }
 
+    async fn save_ollama_url(&self, ollama_url: &str) -> Result<()> {
+        self.config.save_ollama_url(ollama_url)?;
+        *self.ollama_url.write().await = ollama_url.to_string();
+        Ok(())
+    }
+
     pub async fn respond_streaming(
         &self,
         prompt: &str,
         mut on_chunk: impl FnMut(&str) + Send,
+        mut on_status: impl FnMut(&str) + Send,
     ) -> Result<String> {
         if let Some((action, app_name)) = application_request(prompt) {
             let response = match action {
@@ -110,28 +161,41 @@ impl Agent {
             return Ok(response);
         }
 
-        let url = format!(
-            "{}/api/chat",
-            self.config.ollama_url.trim_end_matches('/')
-        );
-
-        let mut response = self
-            .client
-            .post(&url)
-            .json(&ChatRequest {
-                model: self.config.model.clone(),
-                messages: build_messages(&self.config.system_prompt, prompt),
-                stream: true,
-                keep_alive: "30m",
-                options: GenerateOptions {
-                    temperature: self.config.temperature,
-                    num_ctx: self.config.context_size,
-                    num_predict: 128,
-                },
-            })
-            .send()
-            .await
-            .with_context(|| format!("No se pudo conectar con Ollama en {url}"))?;
+        let request = ChatRequest {
+            model: self.config.model.clone(),
+            messages: build_messages(&self.config.system_prompt, prompt),
+            stream: true,
+            keep_alive: "30m",
+            options: GenerateOptions {
+                temperature: self.config.temperature,
+                num_ctx: self.config.context_size,
+                num_predict: 128,
+            },
+        };
+        let configured_url = self.ollama_url.read().await.clone();
+        let mut response = match self.send_chat(&configured_url, &request).await {
+            Ok(response) => response,
+            Err(connection_error) => {
+                let discovered_url =
+                    discover_ollama_url(&self.client, &self.config.model, &mut on_status)
+                        .await
+                        .context("No se pudo buscar Ollama en la red local")?;
+                let Some(discovered_url) = discovered_url else {
+                    return Err(connection_error).context(
+                        "No se encontró Ollama con el modelo configurado en la red local",
+                    );
+                };
+                on_status(&format!(
+                    "Ollama encontrada en {discovered_url}; actualizando conexión..."
+                ));
+                let response = self.send_chat(&discovered_url, &request).await?;
+                self.save_ollama_url(&discovered_url).await?;
+                on_status(&format!(
+                    "Conexión con Ollama actualizada: {discovered_url}"
+                ));
+                response
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
@@ -161,6 +225,127 @@ impl Agent {
 
         Ok(answer.trim().to_string())
     }
+
+    async fn send_chat(
+        &self,
+        ollama_url: &str,
+        request: &ChatRequest,
+    ) -> Result<reqwest::Response> {
+        let url = format!("{}/api/chat", ollama_url.trim_end_matches('/'));
+        self.client
+            .post(&url)
+            .json(request)
+            .send()
+            .await
+            .with_context(|| format!("No se pudo conectar con Ollama en {url}"))
+    }
+}
+
+async fn discover_ollama_url(
+    client: &Client,
+    model: &str,
+    on_status: &mut (impl FnMut(&str) + Send),
+) -> Result<Option<String>> {
+    const CONCURRENT_PROBES: usize = 32;
+
+    on_status("Buscando Ollama en la red local...");
+    let candidates = local_ipv4_candidates()?;
+    let mut probes = JoinSet::new();
+    let mut addresses = candidates.into_iter();
+
+    for _ in 0..CONCURRENT_PROBES {
+        if let Some(address) = addresses.next() {
+            spawn_ollama_probe(&mut probes, client, model, address);
+        }
+    }
+
+    while let Some(result) = probes.join_next().await {
+        if let Some(address) = result.context("Falló una búsqueda de Ollama")? {
+            probes.abort_all();
+            let url = format!("http://{address}:11434");
+            on_status(&format!(
+                "Ollama encontrada en {url}; actualizando conexión..."
+            ));
+            return Ok(Some(url));
+        }
+        if let Some(address) = addresses.next() {
+            spawn_ollama_probe(&mut probes, client, model, address);
+        }
+    }
+
+    on_status("No se encontró Ollama con el modelo configurado en la red local.");
+    Ok(None)
+}
+
+fn spawn_ollama_probe(
+    probes: &mut JoinSet<Option<Ipv4Addr>>,
+    client: &Client,
+    model: &str,
+    address: Ipv4Addr,
+) {
+    let client = client.clone();
+    let model = model.to_string();
+    probes.spawn(async move {
+        let response = client
+            .get(format!("http://{address}:11434/api/tags"))
+            .timeout(Duration::from_millis(400))
+            .send()
+            .await
+            .ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let tags = response.json::<OllamaTags>().await.ok()?;
+        tags.models
+            .iter()
+            .any(|candidate| model_matches(&candidate.name, &model))
+            .then_some(address)
+    });
+}
+
+fn model_matches(candidate: &str, configured: &str) -> bool {
+    candidate == configured
+        || (!configured.contains(':') && candidate == format!("{configured}:latest"))
+}
+
+fn local_ipv4_candidates() -> Result<Vec<Ipv4Addr>> {
+    const MAX_CANDIDATES: usize = 512;
+
+    let interfaces = get_if_addrs().context("No se pudieron leer las interfaces de red")?;
+    let mut candidates = HashSet::new();
+    for interface in interfaces {
+        let IfAddr::V4(address) = interface.addr else {
+            continue;
+        };
+        if !address.ip.is_private() || address.ip.is_loopback() {
+            continue;
+        }
+
+        let mask = u32::from(address.netmask);
+        let prefix = mask.count_ones();
+        if !(23..=30).contains(&prefix) || mask != (u32::MAX << (32 - prefix)) {
+            continue;
+        }
+
+        let network = u32::from(address.ip) & mask;
+        let broadcast = network | !mask;
+        for host in (network + 1)..broadcast {
+            let candidate = Ipv4Addr::from(host);
+            if candidate != address.ip {
+                candidates.insert(candidate);
+                if candidates.len() >= MAX_CANDIDATES {
+                    break;
+                }
+            }
+        }
+        if candidates.len() >= MAX_CANDIDATES {
+            break;
+        }
+    }
+
+    let mut candidates = candidates.into_iter().collect::<Vec<_>>();
+    candidates.sort_unstable();
+    Ok(candidates)
 }
 
 fn build_messages(system_prompt: &str, user_prompt: &str) -> Vec<ChatMessage> {
@@ -871,9 +1056,16 @@ mod tests {
     use super::collect_desktop_applications;
     use super::{
         ApplicationAction, ApplicationMatch, append_stream_response, application_match_score,
-        application_request, build_messages, find_application,
+        application_request, build_messages, find_application, model_matches,
     };
     use std::path::PathBuf;
+
+    #[test]
+    fn matches_configured_ollama_model_with_default_latest_tag() {
+        assert!(model_matches("qwen2.5:3b", "qwen2.5:3b"));
+        assert!(model_matches("qwen2.5:latest", "qwen2.5"));
+        assert!(!model_matches("qwen2.5:3b", "qwen2.5"));
+    }
 
     #[test]
     fn prompt_requires_rioplatense_spanish_even_if_input_looks_portuguese() {
@@ -881,8 +1073,16 @@ mod tests {
 
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "system");
-        assert!(messages[0].content.starts_with("Personalidad personalizada."));
-        assert!(messages[0].content.contains("siempre y exclusivamente en español rioplatense"));
+        assert!(
+            messages[0]
+                .content
+                .starts_with("Personalidad personalizada.")
+        );
+        assert!(
+            messages[0]
+                .content
+                .contains("siempre y exclusivamente en español rioplatense")
+        );
         assert!(messages[0].content.contains("No uses portugués"));
         assert!(
             messages[0]
