@@ -34,7 +34,6 @@ enum AppEvent {
     Finished,
 }
 
-#[cfg(any(test, target_os = "windows"))]
 fn speech_segment_end(text: &str) -> Option<usize> {
     if let Some((index, character)) = text
         .char_indices()
