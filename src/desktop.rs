@@ -16,10 +16,7 @@ use anyhow::{Context, Result};
 use eframe::egui::{self, ColorImage};
 use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
 
-#[cfg(target_os = "windows")]
 use crate::speech;
-#[cfg(not(target_os = "windows"))]
-use crate::speech::speak;
 use crate::{
     agent::Agent,
     audio_input::{AudioInput, AudioSnapshotSource, input_device_names},
@@ -53,14 +50,13 @@ fn speech_segment_end(text: &str) -> Option<usize> {
         if character.is_whitespace() {
             last_word_end = Some(index + character.len_utf8());
         }
-        if character_count >= 64 {
+        if character_count >= 24 {
             return last_word_end;
         }
     }
     None
 }
 
-#[cfg(target_os = "windows")]
 fn start_streaming_speech(
     voice: String,
     piper_model: PathBuf,
@@ -999,7 +995,6 @@ impl DesktopApp {
         let speech_enabled = self.config.speech_enabled;
         let assistant_name = self.config.assistant_name.clone();
         let speaking = Arc::clone(&self.speaking);
-        #[cfg(target_os = "windows")]
         let streaming_speech = if speech_enabled {
             Some(start_streaming_speech(
                 voice.clone(),
@@ -1017,7 +1012,6 @@ impl DesktopApp {
                     &prompt,
                     |chunk| {
                         let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
-                        #[cfg(target_os = "windows")]
                         if let Some((speech_chunks, _)) = &streaming_speech {
                             let _ = speech_chunks.send(chunk.to_string());
                         }
@@ -1027,7 +1021,6 @@ impl DesktopApp {
                     },
                 )
                 .await;
-            #[cfg(target_os = "windows")]
             let speech_result = if let Some((speech_chunks, speech_task)) = streaming_speech {
                 drop(speech_chunks);
                 Some(speech_task.await)
@@ -1037,28 +1030,8 @@ impl DesktopApp {
             match response {
                 Ok(_reply) => {
                     if speech_enabled {
-                        #[cfg(target_os = "windows")]
                         if let Some(Err(err)) = speech_result {
                             let _ = tx.send(AppEvent::Status(format!("Error de voz: {err}")));
-                        }
-                        #[cfg(not(target_os = "windows"))]
-                        {
-                            speaking.store(true, Ordering::Relaxed);
-                            let _ = tx.send(AppEvent::Speaking(true));
-                            let _ = tx.send(AppEvent::Status(format!(
-                                "{assistant_name} está hablando..."
-                            )));
-                            match speak(&_reply, &voice, &piper_model).await {
-                                Ok(()) => {
-                                    let _ = tx.send(AppEvent::Status("Listo".to_string()));
-                                }
-                                Err(err) => {
-                                    let _ =
-                                        tx.send(AppEvent::Status(format!("Error de voz: {err:#}")));
-                                }
-                            }
-                            speaking.store(false, Ordering::Relaxed);
-                            let _ = tx.send(AppEvent::Speaking(false));
                         }
                     } else {
                         let _ = tx.send(AppEvent::Status("Listo".to_string()));
@@ -1167,7 +1140,6 @@ impl DesktopApp {
                         Ok(transcript) => {
                             let _ = tx.send(AppEvent::UserTranscript(transcript.clone()));
                             let _ = tx.send(AppEvent::Status("Pensando...".to_string()));
-                            #[cfg(target_os = "windows")]
                             let streaming_speech = if speech_enabled {
                                 Some(start_streaming_speech(
                                     voice.clone(),
@@ -1184,7 +1156,6 @@ impl DesktopApp {
                                     &transcript,
                                     |chunk| {
                                         let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
-                                        #[cfg(target_os = "windows")]
                                         if let Some((speech_chunks, _)) = &streaming_speech {
                                             let _ = speech_chunks.send(chunk.to_string());
                                         }
@@ -1194,7 +1165,6 @@ impl DesktopApp {
                                     },
                                 )
                                 .await;
-                            #[cfg(target_os = "windows")]
                             let speech_result =
                                 if let Some((speech_chunks, speech_task)) = streaming_speech {
                                     drop(speech_chunks);
@@ -1205,33 +1175,10 @@ impl DesktopApp {
                             match response {
                                 Ok(_reply) => {
                                     if speech_enabled {
-                                        #[cfg(target_os = "windows")]
                                         if let Some(Err(err)) = speech_result {
                                             let _ = tx.send(AppEvent::Status(format!(
                                                 "Error de voz: {err}"
                                             )));
-                                        }
-                                        #[cfg(not(target_os = "windows"))]
-                                        {
-                                            speaking.store(true, Ordering::Relaxed);
-                                            let _ = tx.send(AppEvent::Speaking(true));
-                                            let _ = tx.send(AppEvent::Status(format!(
-                                                "{assistant_name} está hablando..."
-                                            )));
-                                            match speak(&_reply, &voice, &piper_model).await {
-                                                Ok(()) => {
-                                                    let _ = tx.send(AppEvent::Status(
-                                                        "Listo".to_string(),
-                                                    ));
-                                                }
-                                                Err(err) => {
-                                                    let _ = tx.send(AppEvent::Status(format!(
-                                                        "Error de voz: {err:#}"
-                                                    )));
-                                                }
-                                            }
-                                            speaking.store(false, Ordering::Relaxed);
-                                            let _ = tx.send(AppEvent::Speaking(false));
                                         }
                                     } else {
                                         let _ = tx.send(AppEvent::Status("Listo".to_string()));
@@ -1806,8 +1753,8 @@ mod speech_stream_tests {
 
     #[test]
     fn emits_long_text_at_a_word_boundary() {
-        let text = "palabra ".repeat(9);
-        assert_eq!(speech_segment_end(&text), Some(64));
+        let text = "palabra ".repeat(4);
+        assert_eq!(speech_segment_end(&text), Some(24));
     }
 }
 
