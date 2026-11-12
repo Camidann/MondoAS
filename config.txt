@@ -1,4 +1,4 @@
-# Las rutas relativas se resuelven desde la carpeta de este archivo.
+# Las rutas relativas se resuelven desde la carpeta de este archivo. chi
 assistant_name=BMO
 ollama_url=http://10.0.2.123:11434
 model=qwen2.5:3b
