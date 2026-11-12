@@ -16,11 +16,14 @@ use anyhow::{Context, Result};
 use eframe::egui::{self, ColorImage};
 use global_hotkey::{GlobalHotKeyManager, hotkey::HotKey};
 
+#[cfg(target_os = "windows")]
+use crate::speech;
+#[cfg(not(target_os = "windows"))]
+use crate::speech::speak;
 use crate::{
     agent::Agent,
     audio_input::{AudioInput, AudioSnapshotSource, input_device_names},
     config::AgentConfig,
-    speech::speak,
     transcription::WhisperTranscriber,
 };
 
@@ -32,6 +35,93 @@ enum AppEvent {
     Status(String),
     Speaking(bool),
     Finished,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn speech_segment_end(text: &str) -> Option<usize> {
+    if let Some((index, character)) = text
+        .char_indices()
+        .find(|(_, character)| matches!(character, '.' | '!' | '?' | '\n' | '！' | '？'))
+    {
+        return Some(index + character.len_utf8());
+    }
+
+    let mut character_count = 0;
+    let mut last_word_end = None;
+    for (index, character) in text.char_indices() {
+        character_count += 1;
+        if character.is_whitespace() {
+            last_word_end = Some(index + character.len_utf8());
+        }
+        if character_count >= 64 {
+            return last_word_end;
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn start_streaming_speech(
+    voice: String,
+    piper_model: PathBuf,
+    assistant_name: String,
+    tx: Sender<AppEvent>,
+    speaking: Arc<AtomicBool>,
+) -> (
+    tokio::sync::mpsc::UnboundedSender<String>,
+    JoinHandle<Result<()>>,
+) {
+    let (speech_tx, mut speech_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let task = tokio::spawn(async move {
+        let mut pending = String::new();
+        let mut started = false;
+        let result = async {
+            while let Some(chunk) = speech_rx.recv().await {
+                pending.push_str(&chunk);
+                while let Some(end) = speech_segment_end(&pending) {
+                    let segment = pending.drain(..end).collect::<String>();
+                    if !started {
+                        started = true;
+                        speaking.store(true, Ordering::Relaxed);
+                        let _ = tx.send(AppEvent::Speaking(true));
+                        let _ = tx.send(AppEvent::Status(format!(
+                            "{assistant_name} está hablando..."
+                        )));
+                    }
+                    speech::speak(&segment, &voice, &piper_model).await?;
+                }
+            }
+            if !pending.trim().is_empty() {
+                if !started {
+                    started = true;
+                    speaking.store(true, Ordering::Relaxed);
+                    let _ = tx.send(AppEvent::Speaking(true));
+                    let _ = tx.send(AppEvent::Status(format!(
+                        "{assistant_name} está hablando..."
+                    )));
+                }
+                speech::speak(&pending, &voice, &piper_model).await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        if started {
+            speaking.store(false, Ordering::Relaxed);
+            let _ = tx.send(AppEvent::Speaking(false));
+        }
+        match &result {
+            Ok(()) if started => {
+                let _ = tx.send(AppEvent::Status("Listo".to_string()));
+            }
+            Err(error) => {
+                let _ = tx.send(AppEvent::Status(format!("Error de voz: {error:#}")));
+            }
+            _ => {}
+        }
+        result
+    });
+    (speech_tx, task)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -690,17 +780,34 @@ impl DesktopApp {
         };
         let agent = app.agent.clone();
         let event_tx = app.event_tx.clone();
+        let speech_enabled = app.config.speech_enabled;
+        let voice = app.config.voice_name.clone();
         app.status = "Cargando el modelo para responder más rápido...".to_string();
         app.runtime.spawn(async move {
             let status_tx = event_tx.clone();
-            let status = match agent
-                .warm_up(|status| {
-                    let _ = status_tx.send(AppEvent::Status(status.to_string()));
-                })
-                .await
-            {
-                Ok(()) => "Modelo listo.".to_string(),
-                Err(err) => format!("No se pudo precargar el modelo: {err:#}"),
+            let model_warm_up = agent.warm_up(|status| {
+                let _ = status_tx.send(AppEvent::Status(status.to_string()));
+            });
+            let speech_warm_up = async move {
+                #[cfg(target_os = "windows")]
+                if speech_enabled {
+                    return speech::warm_up(&voice).await;
+                }
+                let _ = (speech_enabled, voice);
+                Ok::<(), anyhow::Error>(())
+            };
+            let (model_result, speech_result) = tokio::join!(model_warm_up, speech_warm_up);
+            let status = match (model_result, speech_result) {
+                (Ok(()), Ok(())) => "Modelo listo.".to_string(),
+                (Err(model_err), Ok(())) => {
+                    format!("No se pudo precargar el modelo: {model_err:#}")
+                }
+                (Ok(()), Err(speech_err)) => {
+                    format!("Modelo listo. No se pudo precargar la voz: {speech_err:#}")
+                }
+                (Err(model_err), Err(speech_err)) => format!(
+                    "No se pudo precargar el modelo: {model_err:#}. Tampoco la voz: {speech_err:#}"
+                ),
             };
             let _ = event_tx.send(AppEvent::Status(status));
         });
@@ -892,36 +999,67 @@ impl DesktopApp {
         let speech_enabled = self.config.speech_enabled;
         let assistant_name = self.config.assistant_name.clone();
         let speaking = Arc::clone(&self.speaking);
+        #[cfg(target_os = "windows")]
+        let streaming_speech = if speech_enabled {
+            Some(start_streaming_speech(
+                voice.clone(),
+                piper_model.clone(),
+                assistant_name.clone(),
+                tx.clone(),
+                Arc::clone(&speaking),
+            ))
+        } else {
+            None
+        };
         self.runtime.spawn(async move {
-            match agent
+            let response = agent
                 .respond_streaming(
                     &prompt,
                     |chunk| {
                         let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
+                        #[cfg(target_os = "windows")]
+                        if let Some((speech_chunks, _)) = &streaming_speech {
+                            let _ = speech_chunks.send(chunk.to_string());
+                        }
                     },
                     |status| {
                         let _ = tx.send(AppEvent::Status(status.to_string()));
                     },
                 )
-                .await
-            {
-                Ok(reply) => {
+                .await;
+            #[cfg(target_os = "windows")]
+            let speech_result = if let Some((speech_chunks, speech_task)) = streaming_speech {
+                drop(speech_chunks);
+                Some(speech_task.await)
+            } else {
+                None
+            };
+            match response {
+                Ok(_reply) => {
                     if speech_enabled {
-                        speaking.store(true, Ordering::Relaxed);
-                        let _ = tx.send(AppEvent::Speaking(true));
-                        let _ = tx.send(AppEvent::Status(format!(
-                            "{assistant_name} está hablando..."
-                        )));
-                        match speak(&reply, &voice, &piper_model).await {
-                            Ok(()) => {
-                                let _ = tx.send(AppEvent::Status("Listo".to_string()));
-                            }
-                            Err(err) => {
-                                let _ = tx.send(AppEvent::Status(format!("Error de voz: {err:#}")));
-                            }
+                        #[cfg(target_os = "windows")]
+                        if let Some(Err(err)) = speech_result {
+                            let _ = tx.send(AppEvent::Status(format!("Error de voz: {err}")));
                         }
-                        speaking.store(false, Ordering::Relaxed);
-                        let _ = tx.send(AppEvent::Speaking(false));
+                        #[cfg(not(target_os = "windows"))]
+                        {
+                            speaking.store(true, Ordering::Relaxed);
+                            let _ = tx.send(AppEvent::Speaking(true));
+                            let _ = tx.send(AppEvent::Status(format!(
+                                "{assistant_name} está hablando..."
+                            )));
+                            match speak(&_reply, &voice, &piper_model).await {
+                                Ok(()) => {
+                                    let _ = tx.send(AppEvent::Status("Listo".to_string()));
+                                }
+                                Err(err) => {
+                                    let _ =
+                                        tx.send(AppEvent::Status(format!("Error de voz: {err:#}")));
+                                }
+                            }
+                            speaking.store(false, Ordering::Relaxed);
+                            let _ = tx.send(AppEvent::Speaking(false));
+                        }
                     } else {
                         let _ = tx.send(AppEvent::Status("Listo".to_string()));
                     }
@@ -1029,38 +1167,72 @@ impl DesktopApp {
                         Ok(transcript) => {
                             let _ = tx.send(AppEvent::UserTranscript(transcript.clone()));
                             let _ = tx.send(AppEvent::Status("Pensando...".to_string()));
-                            match agent
+                            #[cfg(target_os = "windows")]
+                            let streaming_speech = if speech_enabled {
+                                Some(start_streaming_speech(
+                                    voice.clone(),
+                                    piper_model.clone(),
+                                    assistant_name.clone(),
+                                    tx.clone(),
+                                    Arc::clone(&speaking),
+                                ))
+                            } else {
+                                None
+                            };
+                            let response = agent
                                 .respond_streaming(
                                     &transcript,
                                     |chunk| {
                                         let _ = tx.send(AppEvent::ReplyChunk(chunk.to_string()));
+                                        #[cfg(target_os = "windows")]
+                                        if let Some((speech_chunks, _)) = &streaming_speech {
+                                            let _ = speech_chunks.send(chunk.to_string());
+                                        }
                                     },
                                     |status| {
                                         let _ = tx.send(AppEvent::Status(status.to_string()));
                                     },
                                 )
-                                .await
-                            {
-                                Ok(reply) => {
+                                .await;
+                            #[cfg(target_os = "windows")]
+                            let speech_result =
+                                if let Some((speech_chunks, speech_task)) = streaming_speech {
+                                    drop(speech_chunks);
+                                    Some(speech_task.await)
+                                } else {
+                                    None
+                                };
+                            match response {
+                                Ok(_reply) => {
                                     if speech_enabled {
-                                        speaking.store(true, Ordering::Relaxed);
-                                        let _ = tx.send(AppEvent::Speaking(true));
-                                        let _ = tx.send(AppEvent::Status(format!(
-                                            "{assistant_name} está hablando..."
-                                        )));
-                                        match speak(&reply, &voice, &piper_model).await {
-                                            Ok(()) => {
-                                                let _ =
-                                                    tx.send(AppEvent::Status("Listo".to_string()));
-                                            }
-                                            Err(err) => {
-                                                let _ = tx.send(AppEvent::Status(format!(
-                                                    "Error de voz: {err:#}"
-                                                )));
-                                            }
+                                        #[cfg(target_os = "windows")]
+                                        if let Some(Err(err)) = speech_result {
+                                            let _ = tx.send(AppEvent::Status(format!(
+                                                "Error de voz: {err}"
+                                            )));
                                         }
-                                        speaking.store(false, Ordering::Relaxed);
-                                        let _ = tx.send(AppEvent::Speaking(false));
+                                        #[cfg(not(target_os = "windows"))]
+                                        {
+                                            speaking.store(true, Ordering::Relaxed);
+                                            let _ = tx.send(AppEvent::Speaking(true));
+                                            let _ = tx.send(AppEvent::Status(format!(
+                                                "{assistant_name} está hablando..."
+                                            )));
+                                            match speak(&_reply, &voice, &piper_model).await {
+                                                Ok(()) => {
+                                                    let _ = tx.send(AppEvent::Status(
+                                                        "Listo".to_string(),
+                                                    ));
+                                                }
+                                                Err(err) => {
+                                                    let _ = tx.send(AppEvent::Status(format!(
+                                                        "Error de voz: {err:#}"
+                                                    )));
+                                                }
+                                            }
+                                            speaking.store(false, Ordering::Relaxed);
+                                            let _ = tx.send(AppEvent::Speaking(false));
+                                        }
                                     } else {
                                         let _ = tx.send(AppEvent::Status("Listo".to_string()));
                                     }
@@ -1619,6 +1791,23 @@ mod automatic_speech_tests {
             ),
             Some(VoiceActivity::Finished)
         );
+    }
+}
+
+#[cfg(test)]
+mod speech_stream_tests {
+    use super::speech_segment_end;
+
+    #[test]
+    fn emits_completed_sentences_without_waiting_for_the_full_reply() {
+        assert_eq!(speech_segment_end("Hola. ¿Cómo estás?"), Some(5));
+        assert_eq!(speech_segment_end("Una frase incompleta"), None);
+    }
+
+    #[test]
+    fn emits_long_text_at_a_word_boundary() {
+        let text = "palabra ".repeat(9);
+        assert_eq!(speech_segment_end(&text), Some(64));
     }
 }
 

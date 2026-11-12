@@ -36,7 +36,7 @@ Copy-Item .\src\whisper.cpp\models\ggml-base-q5_1.bin .\whisper\
 - **Ocultar la cara:** usa `Alt+Shift+P` o el atajo que hayas configurado.
 - **Abrir una aplicación por voz:** di, por ejemplo, «abrí Chrome» o «abrí Calculadora». Para cerrarla, di «cerrá Chrome». Si hay más de una coincidencia, Mondo te pide que aclares cuál.
 
-En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y luego transcribe y envía la consulta a Ollama. En modo manual muestra fragmentos de lo que reconoce mientras hablas. Muestra la respuesta en el chat; la lectura en voz alta se puede activar con `speech_enabled=true`.
+En escucha automática, Mondo detecta la voz, espera dos segundos de silencio y luego transcribe y envía la consulta a Ollama. En modo manual muestra fragmentos de lo que reconoce mientras hablas. Muestra la respuesta en el chat; con `speech_enabled=true`, en Windows la voz empieza mientras llega la respuesta, por frases o al acumular unas 64 letras.
 
 La voz y el reconocimiento se procesan localmente. Ollama debe estar abierto; puede estar en esta computadora o en otra a la que tengas acceso por red.
 

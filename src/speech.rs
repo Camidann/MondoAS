@@ -2,49 +2,188 @@
 use anyhow::{Context, Result, bail};
 #[cfg(target_os = "windows")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(target_os = "windows")]
+use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
 };
 use tokio::process::Command;
+#[cfg(target_os = "windows")]
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout},
+    sync::Mutex,
+};
+
+#[cfg(target_os = "windows")]
+struct WindowsSpeech {
+    _child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsSpeech {
+    async fn start(voice_name: &str) -> Result<Self> {
+        let encoded_voice = STANDARD.encode(voice_name.as_bytes());
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'\n\
+             try {{\n\
+                 Add-Type -AssemblyName System.Speech\n\
+                 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n\
+                 $voiceName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_voice}'))\n\
+                 $voices = $synth.GetInstalledVoices()\n\
+                 if ($voiceName) {{\n\
+                     $voice = $voices | Where-Object {{ $_.VoiceInfo.Name -eq $voiceName }} | Select-Object -First 1\n\
+                     if (-not $voice) {{ throw \"No está instalada la voz configurada: $voiceName\" }}\n\
+                     $synth.SelectVoice($voice.VoiceInfo.Name)\n\
+                 }} else {{\n\
+                     $voice = $voices | Where-Object {{ $_.VoiceInfo.Culture.Name -like 'es-*' }} | Select-Object -First 1\n\
+                     if ($voice) {{ $synth.SelectVoice($voice.VoiceInfo.Name) }}\n\
+                 }}\n\
+                 [Console]::Out.WriteLine('READY')\n\
+                 [Console]::Out.Flush()\n\
+                 while (($line = [Console]::In.ReadLine()) -ne $null) {{\n\
+                     try {{\n\
+                         $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($line))\n\
+                         $synth.Speak($text)\n\
+                         [Console]::Out.WriteLine('OK')\n\
+                     }} catch {{\n\
+                         $errorText = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_.Exception.Message))\n\
+                         [Console]::Out.WriteLine(\"ERROR:$errorText\")\n\
+                     }}\n\
+                     [Console]::Out.Flush()\n\
+                 }}\n\
+             }} catch {{\n\
+                 $errorText = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_.Exception.Message))\n\
+                 [Console]::Out.WriteLine(\"START_ERROR:$errorText\")\n\
+                 [Console]::Out.Flush()\n\
+             }}",
+        );
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .context("No se pudo iniciar la síntesis de voz de Windows")?;
+        let stdin = child
+            .stdin
+            .take()
+            .context("No se pudo enviar texto al sintetizador de Windows")?;
+        let stdout = child
+            .stdout
+            .take()
+            .context("No se pudo recibir la respuesta del sintetizador de Windows")?;
+        let mut speech = Self {
+            _child: child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        };
+        let mut response = String::new();
+        if speech
+            .stdout
+            .read_line(&mut response)
+            .await
+            .context("No se pudo inicializar la voz de Windows")?
+            == 0
+        {
+            bail!("El sintetizador de Windows se cerró durante el inicio");
+        }
+        if response.trim() != "READY" {
+            bail!(
+                "No se pudo inicializar la voz de Windows: {}",
+                decode_speech_error(response.trim(), "START_ERROR:")
+            );
+        }
+        Ok(speech)
+    }
+
+    async fn speak(&mut self, text: &str) -> Result<()> {
+        let encoded_text = STANDARD.encode(text.as_bytes());
+        self.stdin
+            .write_all(encoded_text.as_bytes())
+            .await
+            .context("No se pudo enviar texto al sintetizador de Windows")?;
+        self.stdin
+            .write_all(b"\n")
+            .await
+            .context("No se pudo enviar texto al sintetizador de Windows")?;
+        self.stdin
+            .flush()
+            .await
+            .context("No se pudo enviar texto al sintetizador de Windows")?;
+
+        let mut response = String::new();
+        if self
+            .stdout
+            .read_line(&mut response)
+            .await
+            .context("No se pudo esperar la síntesis de voz de Windows")?
+            == 0
+        {
+            bail!("El sintetizador de Windows se cerró antes de completar la voz");
+        }
+        match response.trim() {
+            "OK" => Ok(()),
+            response => bail!(
+                "La síntesis de voz falló: {}",
+                decode_speech_error(response, "ERROR:")
+            ),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn decode_speech_error(response: &str, prefix: &str) -> String {
+    response
+        .strip_prefix(prefix)
+        .and_then(|encoded| STANDARD.decode(encoded).ok())
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .unwrap_or_else(|| response.to_string())
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_SPEECH: OnceLock<Mutex<Option<WindowsSpeech>>> = OnceLock::new();
+
+#[cfg(target_os = "windows")]
+async fn windows_speech(text: &str, voice_name: &str) -> Result<()> {
+    let speech = WINDOWS_SPEECH.get_or_init(|| Mutex::new(None));
+    let mut speech = speech.lock().await;
+    if speech.is_none() {
+        *speech = Some(WindowsSpeech::start(voice_name).await?);
+    }
+    let result = match speech.as_mut() {
+        Some(speech) => speech.speak(text).await,
+        None => bail!("No se pudo inicializar la voz de Windows"),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *speech = None;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub async fn warm_up(voice_name: &str) -> Result<()> {
+    let speech = WINDOWS_SPEECH.get_or_init(|| Mutex::new(None));
+    let mut speech = speech.lock().await;
+    if speech.is_none() {
+        *speech = Some(WindowsSpeech::start(voice_name).await?);
+    }
+    Ok(())
+}
 
 pub async fn speak(text: &str, voice_name: &str, piper_model: &std::path::Path) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let _ = piper_model;
-        let encoded_text = STANDARD.encode(text.as_bytes());
-        let encoded_voice = STANDARD.encode(voice_name.as_bytes());
-        let script = format!(
-            // esto esta hecho por ia / this is made by ai
-            "$text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{}')); \
-             $voiceName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{}')); \
-             Add-Type -AssemblyName System.Speech; \
-             $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
-             $voices = $synth.GetInstalledVoices(); \
-             if ($voiceName) {{ \
-                 $voice = $voices | Where-Object {{ $_.VoiceInfo.Name -eq $voiceName }} | Select-Object -First 1; \
-                 if (-not $voice) {{ throw \"No está instalada la voz configurada: $voiceName\" }}; \
-                 $synth.SelectVoice($voice.VoiceInfo.Name); \
-             }} else {{ \
-                 $voice = $voices | Where-Object {{ $_.VoiceInfo.Culture.Name -like 'es-*' }} | Select-Object -First 1; \
-                 if ($voice) {{ $synth.SelectVoice($voice.VoiceInfo.Name) }}; \
-             }}; \
-             $synth.Speak($text);",
-            encoded_text, encoded_voice
-        ); // hasta aqui es hecho por ia / until here is made by ai
-        let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output()
-            .await
-            .context("No se pudo iniciar la síntesis de voz de Windows")?;
-        if !output.status.success() {
-            bail!(
-                "La síntesis de voz falló: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        Ok(())
+        windows_speech(text, voice_name).await
     }
 
     #[cfg(target_os = "linux")]
