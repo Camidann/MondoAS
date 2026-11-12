@@ -34,28 +34,6 @@ enum AppEvent {
     Finished,
 }
 
-fn speech_segment_end(text: &str) -> Option<usize> {
-    if let Some((index, character)) = text
-        .char_indices()
-        .find(|(_, character)| matches!(character, '.' | '!' | '?' | '\n' | '！' | '？'))
-    {
-        return Some(index + character.len_utf8());
-    }
-
-    let mut character_count = 0;
-    let mut last_word_end = None;
-    for (index, character) in text.char_indices() {
-        character_count += 1;
-        if character.is_whitespace() {
-            last_word_end = Some(index + character.len_utf8());
-        }
-        if character_count >= 24 {
-            return last_word_end;
-        }
-    }
-    None
-}
-
 fn start_streaming_speech(
     voice: String,
     piper_model: PathBuf,
@@ -73,31 +51,15 @@ fn start_streaming_speech(
         let result = async {
             while let Some(chunk) = speech_rx.recv().await {
                 pending.push_str(&chunk);
-                while let Some(end) = speech_segment_end(&pending) {
-                    let segment = pending.drain(..end).collect::<String>();
-                    if !started {
-                        started = true;
-                        speaking.store(true, Ordering::Relaxed);
-                        let _ = tx.send(AppEvent::Speaking(true));
-                        let _ = tx.send(AppEvent::Status(format!(
-                            "{assistant_name} está hablando..."
-                        )));
-                    }
-                    speech::speak(&segment, &voice, &piper_model).await?;
-                }
             }
             if !pending.trim().is_empty() {
-                if !started {
-                    started = true;
-                    speaking.store(true, Ordering::Relaxed);
-                    let _ = tx.send(AppEvent::Speaking(true));
-                    let _ = tx.send(AppEvent::Status(format!(
-                        "{assistant_name} está hablando..."
-                    )));
-                }
+                started = true;
+                speaking.store(true, Ordering::Relaxed);
+                let _ = tx.send(AppEvent::Speaking(true));
+                let _ = tx.send(AppEvent::Status(format!(
+                    "{assistant_name} está hablando..."
+                )));
                 speech::speak(&pending, &voice, &piper_model).await?;
-            }
-            if started {
                 speech::finish().await?;
             }
             Ok::<(), anyhow::Error>(())
@@ -1740,23 +1702,6 @@ mod automatic_speech_tests {
             ),
             Some(VoiceActivity::Finished)
         );
-    }
-}
-
-#[cfg(test)]
-mod speech_stream_tests {
-    use super::speech_segment_end;
-
-    #[test]
-    fn emits_completed_sentences_without_waiting_for_the_full_reply() {
-        assert_eq!(speech_segment_end("Hola. ¿Cómo estás?"), Some(5));
-        assert_eq!(speech_segment_end("Una frase incompleta"), None);
-    }
-
-    #[test]
-    fn emits_long_text_at_a_word_boundary() {
-        let text = "palabra ".repeat(4);
-        assert_eq!(speech_segment_end(&text), Some(24));
     }
 }
 
