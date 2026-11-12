@@ -97,6 +97,9 @@ fn start_streaming_speech(
                 }
                 speech::speak(&pending, &voice, &piper_model).await?;
             }
+            if started {
+                speech::finish().await?;
+            }
             Ok::<(), anyhow::Error>(())
         }
         .await;

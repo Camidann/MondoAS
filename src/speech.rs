@@ -33,6 +33,7 @@ impl WindowsSpeech {
              try {{\n\
                  Add-Type -AssemblyName System.Speech\n\
                  $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer\n\
+                 $synth.Rate = 3\n\
                  $voiceName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('{encoded_voice}'))\n\
                  $voices = $synth.GetInstalledVoices()\n\
                  if ($voiceName) {{\n\
@@ -47,8 +48,13 @@ impl WindowsSpeech {
                  [Console]::Out.Flush()\n\
                  while (($line = [Console]::In.ReadLine()) -ne $null) {{\n\
                      try {{\n\
-                         $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($line))\n\
-                         $synth.Speak($text)\n\
+                         if ($line -eq 'WAIT') {{\n\
+                             if (-not $synth.WaitUntilDone(-1)) {{ throw 'La voz no terminó de reproducirse' }}\n\
+                         }} else {{\n\
+                             if (-not $line.StartsWith('SPEAK:')) {{ throw 'Comando de voz inválido' }}\n\
+                             $text = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($line.Substring(6)))\n\
+                             $null = $synth.SpeakAsync($text)\n\
+                         }}\n\
                          [Console]::Out.WriteLine('OK')\n\
                      }} catch {{\n\
                          $errorText = [System.Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($_.Exception.Message))\n\
@@ -104,18 +110,26 @@ impl WindowsSpeech {
 
     async fn speak(&mut self, text: &str) -> Result<()> {
         let encoded_text = STANDARD.encode(text.as_bytes());
+        self.send_command(&format!("SPEAK:{encoded_text}")).await
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        self.send_command("WAIT").await
+    }
+
+    async fn send_command(&mut self, command: &str) -> Result<()> {
         self.stdin
-            .write_all(encoded_text.as_bytes())
+            .write_all(command.as_bytes())
             .await
-            .context("No se pudo enviar texto al sintetizador de Windows")?;
+            .context("No se pudo enviar un comando al sintetizador de Windows")?;
         self.stdin
             .write_all(b"\n")
             .await
-            .context("No se pudo enviar texto al sintetizador de Windows")?;
+            .context("No se pudo enviar un comando al sintetizador de Windows")?;
         self.stdin
             .flush()
             .await
-            .context("No se pudo enviar texto al sintetizador de Windows")?;
+            .context("No se pudo enviar un comando al sintetizador de Windows")?;
 
         let mut response = String::new();
         if self
@@ -176,6 +190,28 @@ pub async fn warm_up(voice_name: &str) -> Result<()> {
     if speech.is_none() {
         *speech = Some(WindowsSpeech::start(voice_name).await?);
     }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub async fn finish() -> Result<()> {
+    let speech = WINDOWS_SPEECH.get_or_init(|| Mutex::new(None));
+    let mut speech = speech.lock().await;
+    let result = match speech.as_mut() {
+        Some(speech) => speech.finish().await,
+        None => Ok(()),
+    };
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            *speech = None;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub async fn finish() -> Result<()> {
     Ok(())
 }
 
